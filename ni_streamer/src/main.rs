@@ -1,10 +1,10 @@
-mod device;
-mod experiment;
-mod nidaqmx;
-mod utils;
-mod worker_cmd_chan;
+// mod device;
+// mod experiment;
+// mod nidaqmx;
+// mod utils;
+// mod worker_cmd_chan;
 
-use niexpctrl_backend::*;
+use base_streamer::*;
 
 /* fn main() {
     let mut exp = Experiment::new();
@@ -53,7 +53,6 @@ use niexpctrl_backend::*;
     exp.stream_exp(50., 2);
 } */
 
-
 /* fn main() {
     let mut exp = Experiment::new();
     // Define devices and associated channels
@@ -66,6 +65,7 @@ use niexpctrl_backend::*;
     // exp.stream_exp(50., 1);
 } */
 
+/*
 fn main() {
     let mut streamer = crate::Experiment::new();
 
@@ -112,4 +112,9 @@ fn main() {
         };
 
     };
+}
+ */
+
+fn main() {
+
 }

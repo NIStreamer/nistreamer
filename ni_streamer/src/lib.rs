@@ -124,21 +124,28 @@
 //! exp.stream_exp(50., 2)
 //! ```
 
+/*
 use pyo3::exceptions::{PyValueError, PyKeyError, PyRuntimeError};
 use pyo3::prelude::*;
+ */
 
+/*
 pub mod device;
 pub mod experiment;
 pub mod nidaqmx;
 pub mod utils;
 pub mod worker_cmd_chan;
+*/
 
+/*
 pub use crate::device::*;
 pub use crate::experiment::Experiment;
 // pub use crate::nidaqmx::*;
 pub use crate::utils::*;
 pub use nicompiler_backend::*;
+*/
 
+/*
 #[pymodule]
 fn niexpctrl_backend(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<Experiment>()?;
@@ -322,3 +329,4 @@ impl Experiment {
     }
     // endregion
 }
+*/
