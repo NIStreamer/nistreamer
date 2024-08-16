@@ -375,7 +375,7 @@ impl NiTask {
         })
     }
 
-    pub fn cfg_output_buffer(&self, buf_size: usize) -> Result<(), DAQmxError> {
+    pub fn cfg_output_buf(&self, buf_size: usize) -> Result<(), DAQmxError> {
         daqmx_call(|| unsafe { DAQmxCfgOutputBuffer(self.handle, buf_size as CUint32) })
     }
 

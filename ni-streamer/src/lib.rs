@@ -129,13 +129,14 @@ use pyo3::exceptions::{PyValueError, PyKeyError, PyRuntimeError};
 use pyo3::prelude::*;
  */
 
-/*
+extern crate core;
+
+pub mod channel;
 pub mod device;
-pub mod experiment;
+// pub mod experiment;
 pub mod nidaqmx;
 pub mod utils;
 pub mod worker_cmd_chan;
-*/
 
 /*
 pub use crate::device::*;

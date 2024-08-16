@@ -26,15 +26,28 @@
 //!   crucial when there's a primary and secondary device setup.
 //! - **Clock Configuration**: Sets up the sample clock, start trigger, and reference clocking for devices.
 //! - **Task Channel Configuration**: Configures the task channels based on the device's task type.
+use std::cmp::Ordering;
+use std::fmt::Debug;
+use indexmap::IndexMap;
+use itertools::Itertools;
+use base_streamer::channel::BaseChan;
+use base_streamer::device::BaseDev;
+use crate::channel::{AOChan, DOChan};
 
 use crate::nidaqmx::*;
 use crate::utils::StreamCounter;
-
+//
 use std::sync::mpsc::{Sender, Receiver, SendError, RecvError};
-use ndarray::Array2;
-
-use nicompiler_backend::*;
+use ndarray::{Array2, s};
+//
+// use nicompiler_backend::*;
 use crate::worker_cmd_chan::{CmdRecvr, WorkerCmd};
+
+pub enum StartSync {
+    Primary(Vec<Receiver<()>>),
+    Secondary(Sender<()>),
+    None
+}
 
 pub struct WorkerError {
     msg: String
@@ -71,14 +84,9 @@ impl ToString for WorkerError {
     }
 }
 
-pub enum StartSync {
-    Primary(Vec<Receiver<()>>),
-    Secondary(Sender<()>),
-    None
-}
 
-pub struct StreamBundle {
-    task_type: TaskType,
+/* pub struct StreamBundle {
+    // task_type: TaskType,
     ni_task: NiTask,
     counter: StreamCounter,
     buf_write_timeout: Option<f64>,  // Some(finite_timeout_in_seconds) or None - wait infinitely
@@ -96,11 +104,68 @@ impl StreamBundle {
             ),
         }
     }
+} */
+pub struct StreamBundle {
+    ni_task: NiTask,
+    counter: StreamCounter,
+    buf_write_timeout: Option<f64>,  // Some(finite_timeout_in_seconds) or None - wait infinitely
+}
+
+pub struct HwCfg {
+    pub start_trig_in: Option<String>,
+    pub start_trig_out: Option<String>,
+    pub samp_clk_in: Option<String>,
+    pub samp_clk_out: Option<String>,
+    pub ref_clk_in: Option<String>,
+    pub min_bufwrite_timeout: Option<f64>,  // Some(finite_timeout_in_seconds) or None - wait infinitely
+}
+impl HwCfg {
+    pub fn dflt() -> Self {
+        Self {
+            start_trig_in: None,
+            start_trig_out: None,
+            samp_clk_in: None,
+            samp_clk_out: None,
+            ref_clk_in: None,
+            min_bufwrite_timeout: Some(5.0),
+        }
+    }
+}
+
+pub trait CommonHwCfg {
+    fn hw_cfg(&self) -> &HwCfg;
+    fn hw_cfg_mut(&mut self) -> &mut HwCfg;
 }
 
 /// The `StreamableDevice` trait extends the [`nicompiler_backend::BaseDevice`] trait of [`nicompiler_backend::Device`]
 /// to provide additional functionality for streaming tasks.
-pub trait StreamableDevice: BaseDevice + Sync + Send {
+pub trait StreamDev<T, C>: BaseDev<T, C> + CommonHwCfg + Sync + Send
+where
+    T: Clone + Debug + Send + Sync + 'static,  // output sample data type
+    C: BaseChan<T>  // channel type
+{
+    /// Helper function that configures the task channels for the device.
+    ///
+    /// This method is a helper utility designed to configure the task channels based on the device's `task_type`.
+    /// It invokes the corresponding DAQmx driver method to set up the channels, ensuring they are correctly initialized
+    /// for subsequent operations. This method is invoked by [`StreamableDevice::stream_task`].
+    ///
+    /// # Parameters
+    ///
+    /// * `task`: A reference to the `NiTask` instance representing the task to be configured.
+    ///
+    /// # Behavior
+    ///
+    /// Depending on the device's `task_type`, the method will:
+    /// * For `TaskType::AO`: Iterate through the compiled, streamable channels and invoke the
+    /// `create_ao_chan` method for each channel.
+    /// * For `TaskType::DO`: Iterate through the compiled, streamable channels and invoke the
+    /// `create_do_chan` method for each channel.
+    ///
+    /// The channel names are constructed using the format `/{device_name}/{channel_name}`.
+    fn create_task_chans(&self, task: &NiTask) -> Result<(), DAQmxError>;
+    fn write_buf(&self, stream_bundle: &StreamBundle, samp_arr: Array2<T>) -> Result<usize, DAQmxError>;
+
     /// Streams an instruction signal to the specified NI-DAQ device.
     ///
     /// This method is responsible for streaming an instruction signal to a National Instruments (NI) DAQ device
@@ -141,105 +206,6 @@ pub trait StreamableDevice: BaseDevice + Sync + Send {
     /// The method relies on various helper functions and methods, such as `is_compiled`, `cfg_task_channels`, and
     /// `calc_signal_nsamps`, to achieve its functionality. Ensure that all dependencies are correctly set up and
     /// that the device has been properly compiled before calling this method.
-    /* === The original version ===
-    fn stream_task(
-        &self,
-        sem: &Arc<Semaphore>,
-        num_devices: usize,
-        bufsize_ms: f64,
-        nreps: usize,
-    ) {
-        let mut timer1 = TickTimer::new();
-        let mut timer2 = TickTimer::new();
-
-        assert!(
-            self.is_compiled(),
-            "Compile device {} before streaming",
-            self.name()
-        );
-
-        // (Not-done) trick: in principle, calculation of the first signal can be done independently of daqmx setup
-        // Still have to figure out how to do in rust.
-        let buf_dur = bufsize_ms / 1000.0;
-        let seq_len = self.total_samps();
-        let buf_size = std::cmp::min(
-            seq_len,
-            (buf_dur * self.samp_rate()).round() as usize,
-        );
-        let mut counter = StreamCounter::new(seq_len, buf_size);
-        let (mut start_pos, mut end_pos) = counter.tick_next();
-
-        // DAQmx Setup
-        let task = NiTask::new();
-        self.cfg_task_channels(&task);
-
-        // Configure buffer, writing method, clock and sync
-        task.cfg_output_buffer(buf_size);
-        task.disallow_regen();
-        let bufwrite = |signal| {
-            match self.task_type() {
-                TaskType::AO => task.write_analog(&signal),
-                TaskType::DO => task.write_digital_port(&signal.map(|&x| x as u32)),
-            };
-        };
-        self.cfg_clk_sync(&task, &seq_len);
-        timer1.tick_print(&format!(
-            "{} cfg (task channels, buffers, clk & sync)",
-            self.name()
-        ));
-
-        // Obtain the first signal (optional: from parallel thread), and do first bufwrite
-        let signal = self.calc_signal_nsamps(start_pos, end_pos, end_pos - start_pos, true, false);
-        timer1.tick_print(&format!("{} calc initial sample chunk", self.name()));
-        bufwrite(signal);
-        timer1.tick_print(&format!("{} initial bufwrite", self.name()));
-
-        for _rep in 0..nreps {
-            // For every repetition, make sure the primary device starts last
-            match self.export_trig() {
-                // The primary device waits for all others to flag they started their tasks
-                Some(true) => {
-                    (0..num_devices).for_each(|_| sem.acquire());
-                    sem.release(); // Release the semaphore to restore count to 1, in preparation for the next run.
-                },
-                _ => {}
-            }
-            task.start();
-            timer2.tick_print(&format!("{} start (restart) overhead", self.name()));
-            match self.export_trig() {
-                // All non-primary devices (both trigger users, and the ones not using trigger at all)
-                // should flag they have started their task
-                Some(true) => {},
-                _ => sem.release()
-            }
-
-            // Main streaming loop
-            while end_pos != seq_len {
-                (start_pos, end_pos) = counter.tick_next();
-                let signal_stream = self.calc_signal_nsamps(start_pos, end_pos, end_pos - start_pos, true, false);
-                bufwrite(signal_stream);
-                // FixMe: add timeout = max(1 second, 2*buf_dur) to avoid deadlocks (hardware bug - trigger not connected -> deadlock).
-                //  Also add option to specify WaitInfinitely for advanced cases (external sample clock freezing and external trigger)
-            }
-
-            // Finishing this streaming run:
-            if nreps > 1 {
-                // If we're on repeat: don't wait for the task to finish, calculate and write the next chunk
-                (start_pos, end_pos) = counter.tick_next();
-                let signal_next_start = self.calc_signal_nsamps(start_pos, end_pos, end_pos - start_pos, true, false);
-                task.wait_until_done(buf_dur * 10.0);
-                timer2.tick_print(&format!("{} end", self.name()));
-                task.stop();
-                bufwrite(signal_next_start);
-            } else {
-                task.wait_until_done(buf_dur * 10.0);
-                timer2.tick_print(&format!("{} end", self.name()));
-                task.stop();
-            }
-        }
-    }
-    */
-
     fn worker_loop(
         &mut self,
         bufsize_ms: f64,
@@ -265,8 +231,8 @@ pub trait StreamableDevice: BaseDevice + Sync + Send {
     }
     fn cfg_run_(&self, bufsize_ms: f64) -> Result<StreamBundle, WorkerError> {
         let buf_dur = bufsize_ms / 1000.0;
-        let buf_write_timeout = match self.get_min_bufwrite_timeout() {
-            Some(min_timeout) => Some(f64::max(10.0*buf_dur, min_timeout)),
+        let buf_write_timeout = match &self.hw_cfg().min_bufwrite_timeout {
+            Some(min_timeout) => Some(f64::max(10.0*buf_dur, *min_timeout)),
             None => None,
         };
 
@@ -279,14 +245,13 @@ pub trait StreamableDevice: BaseDevice + Sync + Send {
 
         // DAQmx Setup
         let task = NiTask::new()?;
-        self.create_task_channels(&task)?;
-        task.cfg_output_buffer(buf_size)?;
+        self.create_task_chans(&task)?;
+        task.cfg_output_buf(buf_size)?;
         task.disallow_regen()?;
         self.cfg_clk_sync(&task, seq_len)?;
 
-        // Bundle NiTask, StreamCounter, buf_write_timeout, and task_type together for convenience:
+        // Bundle NiTask, StreamCounter, and buf_write_timeout together for convenience:
         let mut stream_bundle = StreamBundle {
-            task_type: self.task_type(),
             ni_task: task,
             counter,
             buf_write_timeout,
@@ -294,11 +259,9 @@ pub trait StreamableDevice: BaseDevice + Sync + Send {
 
         // Calc and write the initial sample chunk into the buffer
         let (start_pos, end_pos) = stream_bundle.counter.tick_next().unwrap();
-        let samp_arr = self.calc_signal_nsamps(start_pos, end_pos, end_pos - start_pos, true, false);
-        stream_bundle.write_buf(samp_arr)?;
+        let samp_arr = self.calc_samps(start_pos, end_pos)?;
+        self.write_buf(&stream_bundle, samp_arr)?;
 
-        // FixMe [after Device move to streamer crate]:
-        //  store NiTask+StreamCounter in internal fields instead of returning and passing to stream_/close_run_()
         Ok(stream_bundle)
     }
     fn stream_run_(&self, stream_bundle: &mut StreamBundle, start_sync: &StartSync, calc_next: bool) -> Result<(), WorkerError> {
@@ -319,8 +282,8 @@ pub trait StreamableDevice: BaseDevice + Sync + Send {
 
         // Main streaming loop
         while let Some((start_pos, end_pos)) = stream_bundle.counter.tick_next() {
-            let samp_arr = self.calc_signal_nsamps(start_pos, end_pos, end_pos - start_pos, true, false);
-            stream_bundle.write_buf(samp_arr)?;
+            let samp_arr = self.calc_samps(start_pos, end_pos)?;
+            self.write_buf(&stream_bundle, samp_arr)?;
         }
 
         // Now need to wait for the final sample chunk to be generated out by the card before stopping the task.
@@ -331,49 +294,13 @@ pub trait StreamableDevice: BaseDevice + Sync + Send {
         } else {
             stream_bundle.counter.reset();
             let (start_pos, end_pos) = stream_bundle.counter.tick_next().unwrap();
-            let samp_arr = self.calc_signal_nsamps(start_pos, end_pos, end_pos - start_pos, true, false);
+            let samp_arr = self.calc_samps(start_pos, end_pos)?;
 
             stream_bundle.ni_task.wait_until_done(stream_bundle.buf_write_timeout.clone())?;
             stream_bundle.ni_task.stop()?;
 
-            stream_bundle.write_buf(samp_arr)?;
+            self.write_buf(&stream_bundle, samp_arr)?;
         }
-        Ok(())
-    }
-
-    /// Helper function that configures the task channels for the device.
-    ///
-    /// This method is a helper utility designed to configure the task channels based on the device's `task_type`.
-    /// It invokes the corresponding DAQmx driver method to set up the channels, ensuring they are correctly initialized
-    /// for subsequent operations. This method is invoked by [`StreamableDevice::stream_task`].
-    ///
-    /// # Parameters
-    ///
-    /// * `task`: A reference to the `NiTask` instance representing the task to be configured.
-    ///
-    /// # Behavior
-    ///
-    /// Depending on the device's `task_type`, the method will:
-    /// * For `TaskType::AO`: Iterate through the compiled, streamable channels and invoke the
-    /// `create_ao_chan` method for each channel.
-    /// * For `TaskType::DO`: Iterate through the compiled, streamable channels and invoke the
-    /// `create_do_chan` method for each channel.
-    ///
-    /// The channel names are constructed using the format `/{device_name}/{channel_name}`.
-    fn create_task_channels(&self, task: &NiTask) -> Result<(), DAQmxError> {
-        match self.task_type() {
-            TaskType::AO => {
-                // Require compiled, streamable channels
-                for chan in self.compiled_channels(true, false).iter() {
-                    task.create_ao_chan(&format!("/{}/{}", self.name(), chan.name()))?;
-                };
-            }
-            TaskType::DO => {
-                for chan in self.compiled_channels(true, false).iter() {
-                    task.create_do_chan(&format!("/{}/{}", self.name(), chan.name()))?;
-                };
-            }
-        };
         Ok(())
     }
 
@@ -399,28 +326,30 @@ pub trait StreamableDevice: BaseDevice + Sync + Send {
     ///    configure it accordingly, while others will export the signal.
     fn cfg_clk_sync(&self, task: &NiTask, seq_len: usize) -> Result<(), DAQmxError> {
         // (1) Sample clock timing mode (includes sample clock source). Additionally, config samp_clk_out
-        let samp_clk_src = self.get_samp_clk_in().unwrap_or("".to_string());
+        let samp_clk_src = self.hw_cfg().samp_clk_in.clone().unwrap_or("".to_string());
         task.cfg_samp_clk_timing(
             &samp_clk_src,
             self.samp_rate(),
             seq_len as u64
         )?;
-        if let Some(term) = self.get_samp_clk_out() {
+        if let Some(term) = &self.hw_cfg().samp_clk_out {
             task.export_signal(
                 DAQMX_VAL_SAMPLECLOCK,
                 &format!("/{}/{}", self.name(), term)
             )?
         };
+
         // (2) Start trigger:
-        if let Some(term) = self.get_start_trig_in() {
+        if let Some(term) = &self.hw_cfg().start_trig_in {
             task.cfg_dig_edge_start_trigger(&format!("/{}/{}", self.name(), term))?
         };
-        if let Some(term) = self.get_start_trig_out() {
+        if let Some(term) = &self.hw_cfg().start_trig_out {
             task.export_signal(
                 DAQMX_VAL_STARTTRIGGER,
                 &format!("/{}/{}", self.name(), term)
             )?
         };
+
         // (3) Reference clock
         /*  Only handling ref_clk import here.
 
@@ -443,7 +372,7 @@ pub trait StreamableDevice: BaseDevice + Sync + Send {
         For that reason, we still leave room for arbitrary (static) export from any number of cards,
         but only expose it through the "advanced" function `nidaqmx::connect_terms()`.
         */
-        if let Some(term) = self.get_ref_clk_in() {
+        if let Some(term) = &self.hw_cfg().ref_clk_in {
             task.set_ref_clk_src(&format!("/{}/{}", self.name(), term))?;
             task.set_ref_clk_rate(10.0e6)?;
         };
@@ -452,4 +381,202 @@ pub trait StreamableDevice: BaseDevice + Sync + Send {
     }
 }
 
-impl StreamableDevice for Device {}
+// region AO Device
+pub struct AODev {
+    name: String,
+    samp_rate: f64,
+    chans: IndexMap<String, AOChan>,
+    hw_cfg: HwCfg,
+}
+
+impl AODev {
+    pub fn new(name: &str, samp_rate: f64) -> Self {
+        Self {
+            name: name.to_string(),
+            samp_rate,
+            chans: IndexMap::new(),
+            hw_cfg: HwCfg::dflt(),
+        }
+    }
+
+    pub fn add_chan_sort(&mut self, chan: AOChan) {
+        self.add_chan(chan);
+        self.chans.sort_by(
+            |_k1, v1, _k2, v2| {
+                v1.idx().cmp(&v2.idx())
+            }
+        )
+    }
+}
+
+impl BaseDev<f64, AOChan> for AODev {
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+
+    fn samp_rate(&self) -> f64 {
+        self.samp_rate
+    }
+
+    fn chans(&self) -> &IndexMap<String, AOChan> {
+        &self.chans
+    }
+
+    fn chans_mut(&mut self) -> &mut IndexMap<String, AOChan> {
+        &mut self.chans
+    }
+}
+
+impl CommonHwCfg for AODev {
+    fn hw_cfg(&self) -> &HwCfg {
+        &self.hw_cfg
+    }
+
+    fn hw_cfg_mut(&mut self) -> &mut HwCfg {
+        &mut self.hw_cfg
+    }
+}
+
+impl StreamDev<f64, AOChan> for AODev {
+    fn create_task_chans(&self, task: &NiTask) -> Result<(), DAQmxError> {
+        for chan in self.compiled_chans().iter() {
+            task.create_ao_chan(&format!("/{}/{}", self.name(), chan.name()))?;
+        };
+        Ok(())
+    }
+
+    fn write_buf(&self, stream_bundle: &StreamBundle, samp_arr: Array2<f64>) -> Result<usize, DAQmxError> {
+        stream_bundle.ni_task.write_analog(
+            &samp_arr,
+            stream_bundle.buf_write_timeout.clone()
+        )
+    }
+}
+// endregion
+
+// region DO Device
+pub struct DODev {
+    name: String,
+    samp_rate: f64,
+    chans: IndexMap<String, DOChan>,
+    hw_cfg: HwCfg,
+}
+
+impl DODev {
+    pub fn new(name: &str, samp_rate: f64) -> Self {
+        Self {
+            name: name.to_string(),
+            samp_rate,
+            chans: IndexMap::new(),
+            hw_cfg: HwCfg::dflt(),
+        }
+    }
+
+    pub fn add_chan_sort(&mut self, chan: DOChan) {
+        self.add_chan(chan);
+        self.chans.sort_by(
+            |_k1, v1, _k2, v2| {
+                let (p1, l1) = (v1.port(), v1.line());
+                let (p2, l2) = (v2.port(), v2.line());
+                let port_cmp = p1.cmp(&p2);
+                if port_cmp == Ordering::Equal {
+                     l1.cmp(&l2)
+                } else {
+                    port_cmp
+                }
+            }
+        )
+    }
+
+    pub fn compiled_port_nums(&self) -> Vec<usize> {
+        self.compiled_chans()
+            .iter()
+            .map(|chan| chan.port())
+            .unique()
+            .sorted()
+            .collect()
+    }
+}
+
+impl BaseDev<bool, DOChan> for DODev {
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+
+    fn samp_rate(&self) -> f64 {
+        self.samp_rate
+    }
+
+    fn chans(&self) -> &IndexMap<String, DOChan> {
+        &self.chans
+    }
+
+    fn chans_mut(&mut self) -> &mut IndexMap<String, DOChan> {
+        &mut self.chans
+    }
+}
+
+impl CommonHwCfg for DODev {
+    fn hw_cfg(&self) -> &HwCfg {
+        &self.hw_cfg
+    }
+
+    fn hw_cfg_mut(&mut self) -> &mut HwCfg {
+        &mut self.hw_cfg
+    }
+}
+
+impl StreamDev<bool, DOChan> for DODev {
+    fn create_task_chans(&self, task: &NiTask) -> Result<(), DAQmxError> {
+        for port_num in self.compiled_port_nums() {
+            task.create_do_chan(&format!("/{}/port{}", self.name(), port_num))?;
+        }
+        Ok(())
+    }
+
+    fn write_buf(&self, stream_bundle: &StreamBundle, samp_arr: Array2<bool>) -> Result<usize, DAQmxError> {
+        if samp_arr.shape()[0] != self.compiled_chans().len() {
+            return Err(DAQmxError::new(format!(
+                "The number of rows {} in samp_arr does not match the number of compiled chans {}",
+                samp_arr.shape()[0],
+                self.compiled_chans().len()
+            )))
+        }
+
+        // (1) Merge lines into ports
+        let mut res_arr = Array2::<u32>::zeros((
+            self.compiled_port_nums().len(),  // number of ports
+            samp_arr.shape()[1]               // number of samples
+        ));
+
+        for (res_arr_row_idx, &port_num) in self.compiled_port_nums().iter().enumerate() {
+            let mut res_slice = res_arr.slice_mut(s![res_arr_row_idx,..]);
+
+            for (samp_arr_row_idx, chan) in self.compiled_chans().iter().enumerate() {
+                if chan.port() != port_num {
+                    continue
+                }
+                let factor = 2_u32.pow(chan.line() as u32);
+                let samp_slice = samp_arr.slice(s![samp_arr_row_idx,..]);
+                res_slice.zip_mut_with(&samp_slice, |res, &samp| {
+                    *res += (samp as u32) * factor
+                })
+            }
+        }
+
+        // (2) Write to buffer
+        let samps_written = stream_bundle.ni_task.write_digital_port(
+            &res_arr,
+            stream_bundle.buf_write_timeout.clone()
+        )?;
+        if samps_written != res_arr.shape()[1] {
+            return Err(DAQmxError::new(format!(
+                "samps_written {} did not match the expected sample number {}",
+                samps_written,
+                res_arr.shape()[1]
+            )))
+        }
+        Ok(samps_written)
+    }
+}
+// endregion
