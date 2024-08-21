@@ -46,8 +46,6 @@
 //! device streaming behavior and NI-DAQmx specific operations, respectively.
 
 use std::collections::HashMap;
-use numpy;
-use pyo3::prelude::*;
 use indexmap::IndexMap;
 use std::thread;
 use std::thread::JoinHandle;
@@ -55,12 +53,15 @@ use std::sync::Arc;
 use std::sync::mpsc::{Sender, Receiver, channel};
 use parking_lot::Mutex;
 
-use nicompiler_backend::*;
-
-use crate::device::*;
+use base_streamer::device::BaseDev;
+use base_streamer::streamer::{TypedDev, BaseStreamer};
+use crate::channel::{AOChan, DOChan};
+use crate::device::{AODev, DODev, StreamDev, StartSync, WorkerError};
 use crate::nidaqmx;
 use crate::nidaqmx::DAQmxError;
 use crate::worker_cmd_chan::{CmdChan, CmdRecvr, WorkerCmd};
+
+pub type NIDev = TypedDev<AODev, DODev>;
 
 /// An extended version of the [`nicompiler_backend::Experiment`] struct, tailored to provide direct
 /// interfacing capabilities with NI devices.
@@ -81,10 +82,9 @@ use crate::worker_cmd_chan::{CmdChan, CmdRecvr, WorkerCmd};
 /// If you are not looking to interact directly with NI devices or if your use-case doesn't involve
 /// NI-specific operations, refer to [`nicompiler_backend::Experiment`] for a more general-purpose
 /// experimental control.
-#[pyclass]
-pub struct Experiment {
-    devices: IndexMap<String, Device>,
-    running_devs: IndexMap<String, Arc<Mutex<Device>>>,  // FixMe: this is a temporary dirty hack. Transfer device objects back to the main map (they were transferred out to be able to wrap them into Arc<Mutex<>> for multithreading)
+pub struct Streamer {
+    devs: IndexMap<String, NIDev>,
+    running_devs: IndexMap<String, Arc<Mutex<NIDev>>>,  // FixMe: this is a temporary dirty hack. Transfer device objects back to the main map (they were transferred out to be able to wrap them into Arc<Mutex<>> for multithreading)
     // Streamer-wide settings
     ref_clk_provider: Option<(String, String)>,  // Some((dev_name, terminal_name)) or None
     starts_last: Option<String>,  // Some(dev_name) or None
@@ -94,10 +94,17 @@ pub struct Experiment {
     worker_handles: IndexMap<String, JoinHandle<Result<(), WorkerError>>>,  // FixMe [after Device move to streamer crate]: Maybe store individual device thread handle and report receiver in the Device struct
 }
 
-impl_exp_boilerplate!(Experiment);
+impl BaseStreamer<f64, AOChan, AODev, bool, DOChan, DODev> for Streamer {
+    fn devs(&self) -> &IndexMap<String, NIDev> {
+        &self.devs
+    }
 
-#[pymethods]
-impl Experiment {
+    fn devs_mut(&mut self) -> &mut IndexMap<String, NIDev> {
+        &mut self.devs
+    }
+}
+
+impl Streamer {
     /// Constructor for the `Experiment` class.
     ///
     /// This constructor initializes an instance of the `Experiment` class with an empty collection of devices.
@@ -114,10 +121,9 @@ impl Experiment {
     /// exp = Experiment()
     /// assert len(exp.devices()) == 0
     /// ```
-    #[new]
     pub fn new() -> Self {
         Self {
-            devices: IndexMap::new(),
+            devs: IndexMap::new(),
             running_devs: IndexMap::new(),  // FixMe: this is a temporary dirty hack. Transfer device objects back to the main map (they were transferred out to be able to wrap them into Arc<Mutex<>> for multithreading)
             // Streamer-wide settings
             ref_clk_provider: None,  // Some((dev_name, terminal_name))
@@ -142,9 +148,7 @@ impl Experiment {
     pub fn set_ref_clk_provider(&mut self, provider: Option<(String, String)>) {
         self.ref_clk_provider = provider;
     }
-}
 
-impl Experiment {
     fn export_ref_clk_(&mut self) -> Result<(), DAQmxError> {
         if let Some((dev_name, term_name)) = &self.ref_clk_provider {
             // ToDo: Try tristating the terminal on all other cards in the streamer to ensure the line is not driven
@@ -178,13 +182,14 @@ impl Experiment {
             return Ok(())
         }
 
-        // If any of the workers did not report Ok, they must have stopped either by gracefully returning a WorkerError or by panicking.
+        // If any of the workers did not report Ok, they must have stopped
+        // either by gracefully returning a WorkerError or by panicking.
         // Collect info from all failed workers and return the full error message.
 
         // For each failed worker:
         // * dispose of worker_report_receiver
         // * join the thread to collect error info [join() will automatically consume and dispose of the thread handle]
-        // * transfer Device object from `self.running_devs` back to the main `self.devices`  // FixMe: this is a temporary dirty hack. Transfer device objects back to the main map (they were transferred out to be able to wrap them into Arc<Mutex<>> for multithreading)
+        // * transfer Device object from `self.running_devs` back to the main `self.devs`  // FixMe: this is a temporary dirty hack. Transfer device objects back to the main map (they were transferred out to be able to wrap them into Arc<Mutex<>> for multithreading)
         let mut err_msg_map = IndexMap::new();
         for dev_name in failed_worker_names.iter() {
             self.worker_report_recvrs.shift_remove(dev_name).unwrap();
@@ -205,8 +210,8 @@ impl Experiment {
             };
 
             let dev_container = self.running_devs.shift_remove(dev_name).unwrap();
-            let dev = Arc::into_inner(dev_container).unwrap().into_inner();  // this line extracts Device instance from Arc<Mutex<>> container
-            self.devices.insert(dev_name.to_string(), dev);
+            let dev = Arc::into_inner(dev_container).unwrap().into_inner();  // this line extracts Dev instance from Arc<Mutex<>> container
+            self.devs.insert(dev_name.to_string(), dev);
         }
 
         // Assemble and return the full error message string
@@ -222,10 +227,13 @@ impl Experiment {
     }
 
     pub fn cfg_run_(&mut self, bufsize_ms: f64) -> Result<(), String> {
-        let running_dev_names: Vec<String> = self.devices
+        let running_dev_names: Vec<String> = self.devs
             .iter()
-            .filter(|(_name, dev)| dev.is_compiled())
-            .map(|(name, _dev)| name.to_string())
+            .filter(|(_name, typed_dev)| match typed_dev {
+                NIDev::AO(dev) => dev.is_compiled(),
+                NIDev::DO(dev) => dev.is_compiled(),
+            })
+            .map(|(name, _typed_dev)| name.to_string())
             .collect();
         if running_dev_names.is_empty() {
             return Ok(())
@@ -279,7 +287,7 @@ impl Experiment {
         // FixMe: this is a temporary dirty hack.
         //  Transfer device objects to a separate IndexMap to be able to wrap them into Arc<Mutex<>> for multithreading
         for dev_name in running_dev_names {
-            let dev = self.devices.shift_remove(&dev_name).unwrap();
+            let dev = self.devs.shift_remove(&dev_name).unwrap();
             self.running_devs.insert(dev_name, Arc::new(Mutex::new(dev)));
         }
 
@@ -300,7 +308,7 @@ impl Experiment {
             self.worker_report_recvrs.insert(dev_name.to_string(), report_recvr);
 
             // Launch worker thread
-            let handle = Experiment::launch_worker_thread(
+            let handle = Streamer::launch_worker_thread(
                 dev_name.to_string(),
                 dev_container.clone(),
                 bufsize_ms,
@@ -315,7 +323,7 @@ impl Experiment {
     }
     fn launch_worker_thread(
         dev_name: String,
-        dev_mutex: Arc<Mutex<Device>>,
+        dev_mutex: Arc<Mutex<NIDev>>,
         bufsize_ms: f64,
         cmd_recvr: CmdRecvr,
         report_sendr: Sender<()>,
@@ -324,13 +332,11 @@ impl Experiment {
         let spawn_result = thread::Builder::new()
             .name(dev_name)
             .spawn(move || {
-                let mut dev = dev_mutex.lock();
-                dev.worker_loop(
-                    bufsize_ms,
-                    cmd_recvr,
-                    report_sendr,
-                    start_sync
-                )
+                let mut typed_dev = dev_mutex.lock();
+                match &mut *typed_dev {
+                    NIDev::AO(dev) => dev.worker_loop(bufsize_ms, cmd_recvr, report_sendr, start_sync),
+                    NIDev::DO(dev) => dev.worker_loop(bufsize_ms, cmd_recvr, report_sendr, start_sync),
+                }
             });
         match spawn_result {
             Ok(handle) => Ok(handle),
@@ -382,7 +388,7 @@ impl Experiment {
         // Return all used device objects back to the main IndexMap
         for (dev_name, dev_box) in self.running_devs.drain(..) {
             let dev = Arc::into_inner(dev_box).unwrap().into_inner();
-            self.devices.insert(dev_name, dev);
+            self.devs.insert(dev_name, dev);
         }
 
         // Finally, return
@@ -438,14 +444,14 @@ impl Experiment {
     }
 
     pub fn reset_all(&self) -> Result<(), DAQmxError> {
-        for dev_name in self.devices.keys() {
+        for dev_name in self.devs.keys() {
             nidaqmx::reset_device(dev_name)?
         };
         Ok(())
     }
 }
 
-impl Drop for Experiment {
+impl Drop for Streamer {
     fn drop(&mut self) {
         let res = self.close_run_();
         if let Err(msg) = res {

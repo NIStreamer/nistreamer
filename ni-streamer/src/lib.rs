@@ -133,7 +133,7 @@ extern crate core;
 
 pub mod channel;
 pub mod device;
-// pub mod experiment;
+pub mod streamer;
 pub mod nidaqmx;
 pub mod utils;
 pub mod worker_cmd_chan;
