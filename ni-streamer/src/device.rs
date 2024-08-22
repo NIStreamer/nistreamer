@@ -399,13 +399,14 @@ impl AODev {
         }
     }
 
-    pub fn add_chan_sort(&mut self, chan: AOChan) {
-        self.add_chan(chan);
+    pub fn add_chan_sort(&mut self, chan: AOChan) -> Result<(), String> {
+        self.add_chan(chan)?;
         self.chans.sort_by(
             |_k1, v1, _k2, v2| {
                 v1.idx().cmp(&v2.idx())
             }
-        )
+        );
+        Ok(())
     }
 }
 
@@ -472,8 +473,8 @@ impl DODev {
         }
     }
 
-    pub fn add_chan_sort(&mut self, chan: DOChan) {
-        self.add_chan(chan);
+    pub fn add_chan_sort(&mut self, chan: DOChan) -> Result<(), String> {
+        self.add_chan(chan)?;
         self.chans.sort_by(
             |_k1, v1, _k2, v2| {
                 let (p1, l1) = (v1.port(), v1.line());
@@ -485,7 +486,8 @@ impl DODev {
                     port_cmp
                 }
             }
-        )
+        );
+        Ok(())
     }
 
     pub fn compiled_port_nums(&self) -> Vec<usize> {

@@ -443,11 +443,19 @@ impl Streamer {
         }
     }
 
-    pub fn reset_all(&self) -> Result<(), DAQmxError> {
-        for dev_name in self.devs.keys() {
-            nidaqmx::reset_device(dev_name)?
+    pub fn reset_all(&self) -> Result<(), String> {
+        // Pack the loop into a closure for convenience:
+        //   to catch DAQmxError at any iteration and later convert it to String before returning
+        let closure = || -> Result<(), DAQmxError> {
+            for dev_name in self.devs.keys() {
+                nidaqmx::reset_device(dev_name)?
+            };
+            Ok(())
         };
-        Ok(())
+        match closure() {
+            Ok(()) => Ok(()),
+            Err(daqmx_err) => Err(daqmx_err.to_string())
+        }
     }
 }
 
