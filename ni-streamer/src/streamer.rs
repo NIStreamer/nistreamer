@@ -56,12 +56,10 @@ use parking_lot::Mutex;
 use base_streamer::device::BaseDev;
 use base_streamer::streamer::{TypedDev, BaseStreamer};
 use crate::channel::{AOChan, DOChan};
-use crate::device::{AODev, DODev, StreamDev, StartSync, WorkerError};
+use crate::device::{AODev, DODev, NIDev, StreamDev, StartSync, WorkerError};
 use crate::nidaqmx;
 use crate::nidaqmx::DAQmxError;
 use crate::worker_cmd_chan::{CmdChan, CmdRecvr, WorkerCmd};
-
-pub type NIDev = TypedDev<AODev, DODev>;
 
 /// An extended version of the [`nicompiler_backend::Experiment`] struct, tailored to provide direct
 /// interfacing capabilities with NI devices.

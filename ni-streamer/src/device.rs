@@ -32,6 +32,7 @@ use indexmap::IndexMap;
 use itertools::Itertools;
 use base_streamer::channel::BaseChan;
 use base_streamer::device::BaseDev;
+use base_streamer::streamer::TypedDev;
 use crate::channel::{AOChan, DOChan};
 
 use crate::nidaqmx::*;
@@ -579,6 +580,26 @@ impl StreamDev<bool, DOChan> for DODev {
             )))
         }
         Ok(samps_written)
+    }
+}
+// endregion
+
+// region NIDev (to treat AO and DO uniformly)
+pub type NIDev = TypedDev<AODev, DODev>;
+
+impl CommonHwCfg for NIDev {
+    fn hw_cfg(&self) -> &HwCfg {
+        match self {
+            Self::AO(dev) => dev.hw_cfg(),
+            Self::DO(dev) => dev.hw_cfg()
+        }
+    }
+
+    fn hw_cfg_mut(&mut self) -> &mut HwCfg {
+        match self {
+            Self::AO(dev) => dev.hw_cfg_mut(),
+            Self::DO(dev) => dev.hw_cfg_mut(),
+        }
     }
 }
 // endregion
