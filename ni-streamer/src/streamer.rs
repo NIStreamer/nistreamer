@@ -54,7 +54,7 @@ use std::sync::mpsc::{Sender, Receiver, channel};
 use parking_lot::Mutex;
 
 use base_streamer::device::BaseDev;
-use base_streamer::streamer::{TypedDev, BaseStreamer};
+use base_streamer::streamer::BaseStreamer;
 use crate::channel::{AOChan, DOChan};
 use crate::device::{AODev, DODev, NIDev, StreamDev, StartSync, WorkerError};
 use crate::nidaqmx;

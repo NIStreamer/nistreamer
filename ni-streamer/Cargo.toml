@@ -16,8 +16,9 @@ path = "src/main.rs"
 
 [dependencies]
 base_streamer = { path = "../../base-streamer" }
+usr_fn_lib = {path = "../../usr-fn-lib"}
 indexmap = "2.3.0"
-#pyo3 = { version = "0.22.1", features = ["multiple-pymethods"] }  # "extension-module"
+pyo3 = { version = "0.22.1", features = ["multiple-pymethods"] }  # "extension-module"
 #regex = "1.9.3"
 ndarray = "0.15.6"
 #maplit = "1.0.2"

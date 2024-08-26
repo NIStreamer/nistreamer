@@ -124,20 +124,23 @@
 //! exp.stream_exp(50., 2)
 //! ```
 
-/*
-use pyo3::exceptions::{PyValueError, PyKeyError, PyRuntimeError};
-use pyo3::prelude::*;
- */
-
-extern crate core;
-
 pub mod channel;
 pub mod device;
 pub mod streamer;
 pub mod nidaqmx;
 pub mod utils;
 pub mod worker_cmd_chan;
+pub mod py_wrap;
 
+use pyo3::prelude::*;
+use pyo3::exceptions::{PyValueError};
+
+use crate::py_wrap::StreamerWrap;
+
+extern crate usr_fn_lib;
+use usr_fn_lib::UsrFnLib;
+extern crate base_streamer;
+use base_streamer::fn_lib_tools::StdFnLib;
 /*
 pub use crate::device::*;
 pub use crate::experiment::Experiment;
@@ -146,10 +149,12 @@ pub use crate::utils::*;
 pub use nicompiler_backend::*;
 */
 
-/*
+
 #[pymodule]
-fn niexpctrl_backend(_py: Python, m: &PyModule) -> PyResult<()> {
-    m.add_class::<Experiment>()?;
+fn ni_streamer(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<StreamerWrap>()?;
+    m.add_class::<StdFnLib>()?;
+    m.add_class::<UsrFnLib>()?;
     m.add_function(wrap_pyfunction!(reset_dev, m)?)?;
     m.add_function(wrap_pyfunction!(connect_terms, m)?)?;
     m.add_function(wrap_pyfunction!(disconnect_terms, m)?)?;
@@ -164,6 +169,7 @@ fn reset_dev(_py: Python, name: &str) -> PyResult<()> {
     }
 
 }
+
 #[pyfunction]
 fn connect_terms(_py: Python, src: &str, dest: &str) -> PyResult<()> {
     match nidaqmx::connect_terms(src, dest) {
@@ -171,6 +177,7 @@ fn connect_terms(_py: Python, src: &str, dest: &str) -> PyResult<()> {
         Err(ni_err) => Err(PyValueError::new_err(ni_err.to_string())),
     }
 }
+
 #[pyfunction]
 fn disconnect_terms(_py: Python, src: &str, dest: &str) -> PyResult<()> {
     match nidaqmx::disconnect_terms(src, dest) {
@@ -179,6 +186,7 @@ fn disconnect_terms(_py: Python, src: &str, dest: &str) -> PyResult<()> {
     }
 }
 
+/*
 impl Experiment {
     fn assert_contains_dev(&self, name: &str) -> PyResult<()> {
         if self.devices().contains_key(name) {
