@@ -409,22 +409,32 @@ impl StreamerWrap {
         Ok(())
     }
 
+    #[pyo3(signature = (dev_name, chan_idx, n_samps, start_time=None, end_time=None))]
     pub fn ao_chan_calc_nsamps(
         &self,
         dev_name: &str, chan_idx: usize,
-        start_time: f64, end_time: f64, n_samps: usize
+        n_samps: usize, start_time: Option<f64>, end_time: Option<f64>,
     ) -> PyResult<Vec<f64>> {
         let chan = self.get_ao_chan(dev_name, chan_idx)?;
-        Ok(chan.calc_signal_nsamps(start_time, end_time, n_samps))
+        let res = chan.calc_nsamps(n_samps, start_time, end_time);
+        match res {
+            Ok(samp_vec) => Ok(samp_vec),
+            Err(msg) => Err(PyValueError::new_err(msg))
+        }
     }
 
+    #[pyo3(signature = (dev_name, port, line, n_samps, start_time=None, end_time=None))]
     pub fn do_chan_calc_nsamps(
         &self,
         dev_name: &str, port: usize, line: usize,
-        start_time: f64, end_time: f64, n_samps: usize
+        n_samps: usize, start_time: Option<f64>, end_time: Option<f64>
     ) -> PyResult<Vec<bool>> {
         let chan = self.get_do_chan(dev_name, port, line)?;
-        Ok(chan.calc_signal_nsamps(start_time, end_time, n_samps))
+        let res = chan.calc_nsamps(n_samps, start_time, end_time);
+        match res {
+            Ok(samp_vec) => Ok(samp_vec),
+            Err(msg) => Err(PyValueError::new_err(msg))
+        }
     }
 
     /*
