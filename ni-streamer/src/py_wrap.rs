@@ -395,8 +395,11 @@ impl StreamerWrap {
         func: FnBoxF64, t: f64, dur_spec: Option<(f64, bool)>
     ) -> PyResult<()> {
         let chan = self.get_ao_chan_mut(dev_name, chan_idx)?;
-        chan.add_instr(func.inner, t, dur_spec);
-        Ok(())
+        let res = chan.add_instr(func.inner, t, dur_spec);
+        match res {
+            Ok(()) => Ok(()),
+            Err(msg) => Err(PyValueError::new_err(msg)),
+        }
     }
 
     #[pyo3(signature = (dev_name, port, line, func, t, dur_spec))]
@@ -405,8 +408,11 @@ impl StreamerWrap {
         func: FnBoxBool, t: f64, dur_spec: Option<(f64, bool)>
     ) -> PyResult<()> {
         let chan = self.get_do_chan_mut(dev_name, port, line)?;
-        chan.add_instr(func.inner, t, dur_spec);
-        Ok(())
+        let res = chan.add_instr(func.inner, t, dur_spec);
+        match res {
+            Ok(()) => Ok(()),
+            Err(msg) => Err(PyValueError::new_err(msg)),
+        }
     }
 
     #[pyo3(signature = (dev_name, chan_idx, n_samps, start_time=None, end_time=None))]
