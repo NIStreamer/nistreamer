@@ -559,10 +559,10 @@ impl StreamDev<bool, DOChan> for DODev {
                 if chan.port() != port_num {
                     continue
                 }
-                let factor = 2_u32.pow(chan.line() as u32);
+                let line_idx = chan.line();
                 let samp_slice = samp_arr.slice(s![samp_arr_row_idx,..]);
                 res_slice.zip_mut_with(&samp_slice, |res, &samp| {
-                    *res += (samp as u32) * factor
+                    *res |= (samp as u32) << line_idx;
                 })
             }
         }
