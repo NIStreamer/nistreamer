@@ -67,7 +67,7 @@
 
 use std::ffi::NulError;
 use libc;
-use ndarray::Array2;
+use ndarray::{Array2, ArrayView2};
 use std::fs::OpenOptions;
 use std::io::Write;
 
@@ -450,7 +450,7 @@ impl NiTask {
         Ok(nwritten as usize)
     }
 
-    pub fn write_analog(&self, samp_arr: &Array2<f64>, timeout: Option<f64>) -> Result<usize, DAQmxError> {
+    pub fn write_analog(&self, samp_arr: ArrayView2<f64>, timeout: Option<f64>) -> Result<usize, DAQmxError> {
         let timeout = match timeout {
             Some(timeout) => timeout as CFloat64,
             None => DAQMX_VAL_WAITINFINITELY,
