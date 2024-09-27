@@ -40,7 +40,7 @@ use crate::nidaqmx::*;
 use crate::utils::StreamCounter;
 //
 use std::sync::mpsc::{Sender, Receiver, SendError, RecvError};
-use ndarray::{Array2, s};
+use ndarray::{Array1, s};
 //
 // use nicompiler_backend::*;
 use crate::worker_cmd_chan::{CmdRecvr, WorkerCmd};
@@ -110,7 +110,7 @@ impl StreamBundle {
 pub struct StreamBundle<T> {
     ni_task: NiTask,
     counter: StreamCounter,
-    samp_arr: Array2<T>,
+    samp_buf: Array1<T>,
     buf_write_timeout: Option<f64>,  // Some(finite_timeout_in_seconds) or None - wait infinitely
 }
 
@@ -246,8 +246,8 @@ where
         );
         let counter = StreamCounter::new(seq_len, buf_size);
 
-        let samp_arr = Array2::from_elem(
-            (self.compiled_chans().len(), buf_size),
+        let samp_buf = Array1::from_elem(
+            self.compiled_chans().len() * buf_size,
             self.chans().values().next().unwrap().dflt_val()
         );
 
@@ -262,7 +262,7 @@ where
         let mut stream_bundle = StreamBundle {
             ni_task: task,
             counter,
-            samp_arr,
+            samp_buf,
             buf_write_timeout,
         };
 
@@ -270,7 +270,7 @@ where
         let (start_pos, end_pos) = stream_bundle.counter.tick_next().unwrap();
 
         let calc_samps_start = Instant::now();  /* ToDo: testing */
-        self.calc_samps(stream_bundle.samp_arr.view_mut(), start_pos, end_pos)?;
+        self.calc_samps(stream_bundle.samp_buf.view_mut(), start_pos, end_pos)?;
         let elapsed = calc_samps_start.elapsed().as_millis();  // ToDo: testing
         println!("[{}] initial buffer  calc: {elapsed} ms", self.name());  // ToDo: testing
 
@@ -300,7 +300,7 @@ where
         // Main streaming loop
         while let Some((start_pos, end_pos)) = stream_bundle.counter.tick_next() {
             let now = Instant::now();  // ToDo: testing
-            self.calc_samps(stream_bundle.samp_arr.view_mut(), start_pos, end_pos)?;
+            self.calc_samps(stream_bundle.samp_buf.view_mut(), start_pos, end_pos)?;
             let elapsed = now.elapsed().as_millis();  // ToDo: testing
             println!("[{}]  in-loop buffer calc: {elapsed} ms", self.name());  // ToDo: testing
             self.write_buf(&stream_bundle, end_pos - start_pos)?;
@@ -314,7 +314,7 @@ where
         } else {
             stream_bundle.counter.reset();
             let (start_pos, end_pos) = stream_bundle.counter.tick_next().unwrap();
-            self.calc_samps(stream_bundle.samp_arr.view_mut(), start_pos, end_pos)?;
+            self.calc_samps(stream_bundle.samp_buf.view_mut(), start_pos, end_pos)?;
 
             stream_bundle.ni_task.wait_until_done(stream_bundle.buf_write_timeout.clone())?;
             stream_bundle.ni_task.stop()?;
@@ -468,7 +468,8 @@ impl StreamDev<f64, AOChan> for AODev {
 
     fn write_buf(&self, stream_bundle: &StreamBundle<f64>, samp_num: usize) -> Result<usize, DAQmxError> {
         stream_bundle.ni_task.write_analog(
-            stream_bundle.samp_arr.slice(s![.., ..samp_num]),
+            &stream_bundle.samp_buf,
+            samp_num,
             stream_bundle.buf_write_timeout.clone()
         )
     }
@@ -557,47 +558,47 @@ impl StreamDev<bool, DOChan> for DODev {
     }
 
     fn write_buf(&self, stream_bundle: &StreamBundle<bool>, samp_num: usize) -> Result<usize, DAQmxError> {
-        if stream_bundle.samp_arr.shape()[0] != self.compiled_chans().len() {
-            return Err(DAQmxError::new(format!(
-                "The number of rows {} in samp_arr does not match the number of compiled chans {}",
-                stream_bundle.samp_arr.shape()[0],
-                self.compiled_chans().len()
-            )))
-        }
+
+        // if stream_bundle.samp_buf.shape()[0] != self.compiled_chans().len() {
+        //     return Err(DAQmxError::new(format!(
+        //         "The number of rows {} in samp_arr does not match the number of compiled chans {}",
+        //         stream_bundle.samp_buf.shape()[0],
+        //         self.compiled_chans().len()
+        //     )))
+        // }
 
         // (1) Merge lines into ports
-        let mut res_arr = Array2::<u32>::zeros((
-            self.compiled_port_nums().len(),  // number of ports
-            samp_num               // number of samples
-        ));
+        let mut res_arr = Array1::<u32>::zeros(
+            self.compiled_port_nums().len() * samp_num  // number of ports * number of samples
+        );
 
+        // let merging_loop_now = Instant::now();  /* ToDo: testing */
         for (res_arr_row_idx, &port_num) in self.compiled_port_nums().iter().enumerate() {
-            let mut res_slice = res_arr.slice_mut(s![res_arr_row_idx,..]);
+            let mut res_slice = res_arr.slice_mut(s![res_arr_row_idx * samp_num .. (res_arr_row_idx + 1) * samp_num]);
 
             for (samp_arr_row_idx, chan) in self.compiled_chans().iter().enumerate() {
                 if chan.port() != port_num {
                     continue
                 }
+                let samp_slice = stream_bundle.samp_buf.slice(s![samp_arr_row_idx * samp_num .. (samp_arr_row_idx + 1) * samp_num]);
                 let line_idx = chan.line();
-                let samp_slice = stream_bundle.samp_arr.slice(s![samp_arr_row_idx,..samp_num]);
                 res_slice.zip_mut_with(&samp_slice, |res, &samp| {
                     *res |= (samp as u32) << line_idx;
                 })
             }
         }
+        // let elapsed = merging_loop_now.elapsed().as_millis();  // ToDo: testing
+        // println!("[{}] \tDO line->port merging - merging loop: {elapsed} ms", self.name());  // ToDo: testing
 
         // (2) Write to buffer
+        // let now = Instant::now();  /* ToDo: testing */
         let samps_written = stream_bundle.ni_task.write_digital_port(
             &res_arr,
+            samp_num,
             stream_bundle.buf_write_timeout.clone()
         )?;
-        if samps_written != res_arr.shape()[1] {
-            return Err(DAQmxError::new(format!(
-                "samps_written {} did not match the expected sample number {}",
-                samps_written,
-                res_arr.shape()[1]
-            )))
-        }
+        // let elapsed = now.elapsed().as_millis();  // ToDo: testing
+        // println!("[{}] \tDO sample transfer: {elapsed} ms", self.name());  // ToDo: testing
         Ok(samps_written)
     }
 }

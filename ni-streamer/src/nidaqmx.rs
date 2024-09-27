@@ -67,7 +67,7 @@
 
 use std::ffi::NulError;
 use libc;
-use ndarray::{Array2, ArrayView2};
+use ndarray::{Array1, Array2};
 use std::fs::OpenOptions;
 use std::io::Write;
 
@@ -408,7 +408,7 @@ impl NiTask {
         })
     }
 
-    pub fn write_digital_port(&self, samp_arr: &Array2<u32>, timeout: Option<f64>) -> Result<usize, DAQmxError> {
+    pub fn write_digital_port(&self, samp_buf: &Array1<u32>, samp_num: usize, timeout: Option<f64>) -> Result<usize, DAQmxError> {
         let timeout = match timeout {
             Some(timeout) => timeout as CFloat64,
             None => DAQMX_VAL_WAITINFINITELY,
@@ -417,16 +417,23 @@ impl NiTask {
         daqmx_call(|| unsafe {
             DAQmxWriteDigitalU32(
                 self.handle,
-                samp_arr.shape()[1] as CInt32,
+                samp_num as CInt32,
                 false as CBool32,
                 timeout,
                 DAQMX_VAL_GROUPBYCHANNEL,
-                samp_arr.as_ptr(),
+                samp_buf.as_ptr(),
                 &mut nwritten as *mut CInt32,
                 std::ptr::null_mut(),
             )
         })?;
-        Ok(nwritten as usize)
+        let nwritten = nwritten as usize;
+        if nwritten == samp_num {
+            Ok(nwritten)
+        } else {
+            Err(DAQmxError::new(format!(
+                "write_digital_port(): actually written sample number {nwritten} does not match the originally requested number {samp_num}"
+            )))
+        }
     }
 
     pub fn write_digital_lines(&self, samp_arr: &Array2<u8>, timeout: Option<f64>) -> Result<usize, DAQmxError> {
@@ -450,7 +457,7 @@ impl NiTask {
         Ok(nwritten as usize)
     }
 
-    pub fn write_analog(&self, samp_arr: ArrayView2<f64>, timeout: Option<f64>) -> Result<usize, DAQmxError> {
+    pub fn write_analog(&self, samp_buf: &Array1<f64>, samp_num: usize, timeout: Option<f64>) -> Result<usize, DAQmxError> {
         let timeout = match timeout {
             Some(timeout) => timeout as CFloat64,
             None => DAQMX_VAL_WAITINFINITELY,
@@ -459,16 +466,23 @@ impl NiTask {
         daqmx_call(|| unsafe {
             DAQmxWriteAnalogF64(
                 self.handle,
-                samp_arr.shape()[1] as CInt32,
+                samp_num as CInt32,
                 false as CBool32,
                 timeout,
                 DAQMX_VAL_GROUPBYCHANNEL,
-                samp_arr.as_ptr(),
+                samp_buf.as_ptr(),
                 &mut nwritten as *mut CInt32,
                 std::ptr::null_mut(),
             )
         })?;
-        Ok(nwritten as usize)
+        let nwritten = nwritten as usize;
+        if nwritten == samp_num {
+            Ok(nwritten)
+        } else {
+            Err(DAQmxError::new(format!(
+                "write_analog(): actually written sample number {nwritten} does not match the originally requested number {samp_num}"
+            )))
+        }
     }
 
     pub fn set_ref_clk_rate(&self, rate: f64) -> Result<(), DAQmxError> {
