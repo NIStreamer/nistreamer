@@ -40,7 +40,7 @@ use crate::nidaqmx::*;
 use crate::utils::StreamCounter;
 //
 use std::sync::mpsc::{Sender, Receiver, SendError, RecvError};
-use ndarray::{Array1, s};
+use ndarray::Array1;
 //
 // use nicompiler_backend::*;
 use crate::worker_cmd_chan::{CmdRecvr, WorkerCmd};
@@ -605,26 +605,40 @@ impl StreamDev<bool, DOChan> for DODev {
             }
         }
 
-        // let merging_start = Instant::now();  /* ToDo: testing */
+        // /*ToDo*/ let merging_start = Instant::now();
+        // Access raw data of ndarray::Array1 as native Rust slices
+        //      Since in our case the underlying array is just a contiguous 1D vector,
+        //      Rust's native slicing can be used instead of high-level ArrayBase::slice.
+        //      Native slicing should (at least in principle) be faster because
+        //      ArrayBase::slice introduces greater overhead by allowing arbitrary step size, slicing along any axis, and so on.
+        let chan_samp_buf = match stream_bundle.samp_buf.as_slice() {
+            Some(samp_buf) => samp_buf,
+            None => return Err(DAQmxError::new(String::from(
+                "[write_buf()] BUG: chan_samp_buf.as_slice() returned None"
+            )))
+        };
+        let port_samp_buf = match stream_bundle.port_samp_buf.as_mut().unwrap().as_slice_mut() {
+            Some(samp_buf) => samp_buf,
+            None => return Err(DAQmxError::new(String::from(
+                "[write_buf()] BUG: port_samp_buf.as_slice_mut() returned None"
+            )))
+        };
 
-        for (res_arr_row_idx, &port_num) in self.compiled_port_nums().iter().enumerate() {
-            let mut res_slice = stream_bundle.port_samp_buf
-                .as_mut()
-                .unwrap()
-                .slice_mut(s![res_arr_row_idx * samp_num .. (res_arr_row_idx + 1) * samp_num]);
+        for (port_row_idx, &port_num) in self.compiled_port_nums().iter().enumerate() {
+            let port_slice = &mut port_samp_buf[port_row_idx * samp_num .. (port_row_idx + 1) * samp_num];
 
-            for (samp_arr_row_idx, chan) in self.compiled_chans().iter().enumerate() {
+            for (chan_row_idx, chan) in self.compiled_chans().iter().enumerate() {
                 if chan.port() != port_num {
                     continue
                 }
-                let samp_slice = stream_bundle.samp_buf.slice(s![samp_arr_row_idx * samp_num .. (samp_arr_row_idx + 1) * samp_num]);
+                let chan_slice = &chan_samp_buf[chan_row_idx * samp_num .. (chan_row_idx + 1) * samp_num];
                 let line_idx = chan.line();
-                res_slice.zip_mut_with(&samp_slice, |res, &samp| {
+                for (res, &samp) in port_slice.iter_mut().zip(chan_slice.iter()) {
                     *res |= (samp as u32) << line_idx;
-                })
+                }
             }
         }
-        // println!("[{}] \t\tDO line->port merging: {} ms", self.name(), merging_start.elapsed().as_millis());  // ToDo: testing
+        // /*ToDo*/ println!("[{}] \t\tDO line->port merging: {} ms", self.name(), merging_start.elapsed().as_millis());
 
         // (2) Write to buffer
         // let now = Instant::now();  /* ToDo: testing */
