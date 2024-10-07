@@ -284,7 +284,11 @@ where
         let (start_pos, end_pos) = stream_bundle.counter.tick_next().unwrap();
 
         let calc_samps_start = Instant::now();  /* ToDo: testing */
-        self.calc_samps(stream_bundle.samp_buf.view_mut(), start_pos, end_pos)?;
+        self.calc_samps(
+            stream_bundle.samp_buf.as_slice_mut().expect("[StreamDev::cfg_run_()] BUG: samp_buf.as_slice_mut() returned None"),
+            start_pos,
+            end_pos
+        )?;
         let elapsed = calc_samps_start.elapsed().as_millis();  // ToDo: testing
         println!("[{}] initial buffer  calc: {elapsed} ms", self.name());  // ToDo: testing
 
@@ -314,7 +318,11 @@ where
         // Main streaming loop
         while let Some((start_pos, end_pos)) = stream_bundle.counter.tick_next() {
             let now = Instant::now();  // ToDo: testing
-            self.calc_samps(stream_bundle.samp_buf.view_mut(), start_pos, end_pos)?;
+            self.calc_samps(
+                stream_bundle.samp_buf.as_slice_mut().expect("[StreamDev::stream_run_()] BUG: samp_buf.as_slice_mut() returned None"),
+                start_pos,
+                end_pos
+            )?;
             let elapsed = now.elapsed().as_millis();  // ToDo: testing
             println!("[{}]  in-loop buffer calc: {elapsed} ms", self.name());  // ToDo: testing
             self.write_buf(stream_bundle, end_pos - start_pos)?;
@@ -328,7 +336,11 @@ where
         } else {
             stream_bundle.counter.reset();
             let (start_pos, end_pos) = stream_bundle.counter.tick_next().unwrap();
-            self.calc_samps(stream_bundle.samp_buf.view_mut(), start_pos, end_pos)?;
+            self.calc_samps(
+                stream_bundle.samp_buf.as_slice_mut().expect("[StreamDev::stream_run_()] BUG: samp_buf.as_slice_mut() returned None"),
+                start_pos,
+                end_pos
+            )?;
 
             stream_bundle.ni_task.wait_until_done(stream_bundle.buf_write_timeout.clone())?;
             stream_bundle.ni_task.stop()?;
