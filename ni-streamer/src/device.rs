@@ -615,6 +615,9 @@ impl StreamDev<bool, DOChan> for DODev {
                         self.compiled_port_nums().len()
                     )))
                 }
+
+                // Clear previous values
+                port_samp_buf.fill(0);
             }
         }
         let port_samp_buf = bundle.port_samp_buf.as_mut().unwrap();
