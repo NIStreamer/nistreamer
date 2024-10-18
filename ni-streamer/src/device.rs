@@ -28,20 +28,18 @@
 //! - **Task Channel Configuration**: Configures the task channels based on the device's task type.
 use std::cmp::Ordering;
 use std::fmt::Debug;
-use std::time::Instant;
+use std::sync::mpsc::{Sender, Receiver, SendError, RecvError};
+
 use indexmap::IndexMap;
 use itertools::Itertools;
+
 use base_streamer::channel::BaseChan;
 use base_streamer::device::BaseDev;
 use base_streamer::streamer::TypedDev;
-use crate::channel::{AOChan, DOChan};
 
+use crate::channel::{AOChan, DOChan};
 use crate::nidaqmx::*;
 use crate::utils::StreamCounter;
-//
-use std::sync::mpsc::{Sender, Receiver, SendError, RecvError};
-//
-// use nicompiler_backend::*;
 use crate::worker_cmd_chan::{CmdRecvr, WorkerCmd};
 
 pub enum StartSync {
@@ -85,27 +83,6 @@ impl ToString for WorkerError {
     }
 }
 
-
-/* pub struct StreamBundle {
-    // task_type: TaskType,
-    ni_task: NiTask,
-    counter: StreamCounter,
-    buf_write_timeout: Option<f64>,  // Some(finite_timeout_in_seconds) or None - wait infinitely
-}
-impl StreamBundle {
-    fn write_buf(&self, samp_arr: Array2<f64>) -> Result<usize, DAQmxError> {
-        match self.task_type {
-            TaskType::AO => self.ni_task.write_analog(
-                &samp_arr,
-                self.buf_write_timeout.clone()
-            ),
-            TaskType::DO => self.ni_task.write_digital_port(
-                &samp_arr.map(|&x| x as u32),
-                self.buf_write_timeout.clone()
-            ),
-        }
-    }
-} */
 pub struct StreamBundle<T> {
     ni_task: NiTask,
     counter: StreamCounter,
@@ -281,20 +258,12 @@ where
 
         // Calc and write the initial sample chunk into the buffer
         let (start_pos, end_pos) = stream_bundle.counter.tick_next().unwrap();
-
-        let calc_samps_start = Instant::now();  /* ToDo: testing */
         self.calc_samps(
             &mut stream_bundle.samp_buf[..],
             start_pos,
             end_pos
         )?;
-        let elapsed = calc_samps_start.elapsed().as_millis();  // ToDo: testing
-        println!("[{}] initial buffer  calc: {elapsed} ms", self.name());  // ToDo: testing
-
-        let now = Instant::now();  // ToDo: testing
         self.write_buf(&mut stream_bundle, end_pos - start_pos)?;
-        let elapsed = now.elapsed().as_millis();  // ToDo: testing
-        println!("[{}] initial buffer write: {elapsed} ms", self.name());  // ToDo: testing
 
         Ok(stream_bundle)
     }
@@ -316,14 +285,11 @@ where
 
         // Main streaming loop
         while let Some((start_pos, end_pos)) = stream_bundle.counter.tick_next() {
-            let now = Instant::now();  // ToDo: testing
             self.calc_samps(
                 &mut stream_bundle.samp_buf[..],
                 start_pos,
                 end_pos
             )?;
-            let elapsed = now.elapsed().as_millis();  // ToDo: testing
-            println!("[{}]  in-loop buffer calc: {elapsed} ms", self.name());  // ToDo: testing
             self.write_buf(stream_bundle, end_pos - start_pos)?;
         }
 
@@ -596,10 +562,9 @@ impl StreamDev<bool, DOChan> for DODev {
         }
 
         // (1) Merge lines into ports
-        // /*ToDo*/ let merging_start = Instant::now();
         match bundle.port_samp_buf.as_mut() {
             None => {
-                // This is the first-time write_buf() call during cfg_run() - allocate the Array
+                // This is the first-time write_buf() call during cfg_run() - allocate the new Vec
                 bundle.port_samp_buf = Some(vec![0; self.compiled_port_nums().len() * samp_num]);
             },
             Some(port_samp_buf) => {
@@ -636,17 +601,13 @@ impl StreamDev<bool, DOChan> for DODev {
                 }
             }
         }
-        // /*ToDo*/ println!("[{}] \t\tDO line->port merging: {} ms", self.name(), merging_start.elapsed().as_millis());
 
         // (2) Write to buffer
-        // let now = Instant::now();  /* ToDo: testing */
         let samps_written = bundle.ni_task.write_digital_port(
             &bundle.port_samp_buf.as_ref().unwrap()[..],
             samp_num,
             bundle.buf_write_timeout.clone()
         )?;
-        // let elapsed = now.elapsed().as_millis();  // ToDo: testing
-        // println!("[{}] \tDO sample transfer: {elapsed} ms", self.name());  // ToDo: testing
         Ok(samps_written)
     }
 }

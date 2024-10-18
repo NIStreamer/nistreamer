@@ -91,6 +91,22 @@ use std::sync::{Condvar, Mutex};
 /// by multiple threads. It maintains a count, which is decremented by the `acquire` method
 /// and incremented by the `release` method. When the count is 0, the `acquire` method will block
 /// until another thread calls `release`.
+///
+/// WARNING: this Semaphore is prone to deadlocks.
+///
+/// Specific example of a problematic inter-thread sync implementation:
+///     For N worker threads and the initial semaphore count of 1,
+///     the main thread tries to acquire the semaphore N+1 times.
+///     It has to wait for each worker to release the semaphore once
+///     before it can return from all those acquisition attempts and proceed further
+///     thus implementing "wait for all" sync.
+///     However, if any of the workers panics, it will never up-tick the semaphore.
+///     The main thread will not be aware of that and will continue to wait indefinitely.
+///
+/// Instead of using this Semaphore, use `std::sync::mpsc::channel` with a dedicated sender-receiver
+/// pair for each worker. This channel returns an error when trying to `Receiver.recv()` after
+/// the `Sender` side has been dropped (the worker has quit) so the main thread knows not to wait for
+/// the failed worker.
 pub struct Semaphore {
     count: Mutex<i32>,
     condition: Condvar,

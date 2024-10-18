@@ -46,15 +46,17 @@
 //! device streaming behavior and NI-DAQmx specific operations, respectively.
 
 use std::collections::HashMap;
-use indexmap::IndexMap;
 use std::thread;
 use std::thread::JoinHandle;
 use std::sync::Arc;
 use std::sync::mpsc::{Sender, Receiver, channel};
+
+use indexmap::IndexMap;
 use parking_lot::Mutex;
 
 use base_streamer::device::BaseDev;
 use base_streamer::streamer::BaseStreamer;
+
 use crate::channel::{AOChan, DOChan};
 use crate::device::{AODev, DODev, NIDev, StreamDev, StartSync, WorkerError};
 use crate::nidaqmx;
