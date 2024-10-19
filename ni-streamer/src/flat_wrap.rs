@@ -1,3 +1,7 @@
+//! The purpose of `StreamerWrap` struct defined here is to expose all the user-facing methods
+//! of the streamer, devices, and channels contained in the `Streamer` tree
+//! as a single "flattened" struct to be able to expose them in Python.
+
 use pyo3::prelude::*;
 use pyo3::exceptions::{PyValueError, PyKeyError, PyRuntimeError};
 

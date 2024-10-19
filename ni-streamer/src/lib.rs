@@ -130,12 +130,12 @@ pub mod streamer;
 pub mod nidaqmx;
 pub mod utils;
 pub mod worker_cmd_chan;
-pub mod py_wrap;
+pub mod flat_wrap;
 
 use pyo3::prelude::*;
 use pyo3::exceptions::{PyValueError};
 
-use crate::py_wrap::StreamerWrap;
+use crate::flat_wrap::StreamerWrap;
 
 extern crate usr_fn_lib;
 use usr_fn_lib::UsrFnLib;
