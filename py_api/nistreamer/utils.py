@@ -1,7 +1,7 @@
 import numpy as np
-from niexpctrl_backend import connect_terms as raw_connect_terms
-from niexpctrl_backend import disconnect_terms as raw_disconnect_terms
-from niexpctrl_backend import reset_dev as raw_reset_dev
+from nistreamer_backend import connect_terms as raw_connect_terms
+from nistreamer_backend import disconnect_terms as raw_disconnect_terms
+from nistreamer_backend import reset_dev as raw_reset_dev
 # Import plotly
 PLOTLY_INSTALLED = False
 try:
@@ -64,19 +64,42 @@ class RendOption:
     notebook = 'notebook'
 
 
-def iplot(chan_list, t_start=None, t_end=None, nsamps=1000, renderer='browser', row_height=None):
+def iplot(chan_list, start_time=None, end_time=None, nsamps=1000, renderer='browser', row_height=None):
+    if not PLOTLY_INSTALLED:
+        raise ImportError('Plotly package is not installed. Run `pip install plotly` to get it.')
+
+    # FixMe: this is a dirty hack.
+    #  Consider making this function a method of NIStreamer class to get clear access to streamer_wrap
+    streamer_wrap = chan_list[0]._streamer
+
+    if not streamer_wrap.is_fresh_compiled():
+        raise ValueError("Streamer is not fresh-compiled. (Re)-compile before calculating signal")
+
+    total_run_time = streamer_wrap.total_run_time()
+    if start_time is not None:
+        if start_time > total_run_time:
+            raise ValueError(f"Requsted start_time={start_time} exceeds total run time {total_run_time}")
+    else:
+        start_time = 0.0
+
+    if end_time is not None:
+        if end_time > total_run_time:
+            raise ValueError(f"Requsted end_time={end_time} exceeds total run time {total_run_time}")
+    else:
+        end_time = total_run_time
+
+    if start_time > end_time:
+        raise ValueError(f"Requested start_time={start_time} exceeds end_time={end_time}")
+
+    t_arr = np.linspace(start_time, end_time, nsamps)
 
     # ToDo:
     #   `src_pwr` (`slow_ao_card.ao0`) did not receive any instructions, resulting in this error
     #   PanicException: Attempting to calculate signal on not-compiled channel ao0
     #   Try checking edit cache with `is_edited`
 
-    if not PLOTLY_INSTALLED:
-        raise ImportError('Plotly package is not installed. Run `pip install plotly` to get it.')
-
     chan_num = len(chan_list)
     nsamps = int(nsamps)
-
     fig = make_subplots(
         rows=len(chan_list),
         cols=1,
@@ -96,23 +119,10 @@ def iplot(chan_list, t_start=None, t_end=None, nsamps=1000, renderer='browser', 
         if chan_num > 4:
             fig.update_layout(height=1.1 * 200 * chan_num)
 
-    t_arr = None
     for idx, chan in enumerate(chan_list):
-
-        t_start, t_end, signal_arr = chan.calc_signal(t_start=t_start, t_end=t_end, nsamps=nsamps)
-
-        # Only compute t_arr once since it will be the same for all traces
-        # FixMe BUG: if the first channel in `chan_list` has instructions stopping earlier than on some other channels,
-        #  it will crop t-axis for other channels - should use min(t_start) and max(t_stop) across all channels.
-        if t_arr is None:
-            t_arr = np.linspace(t_start, t_end, nsamps)
-
+        signal_arr = chan.calc_signal(start_time=start_time, end_time=end_time, nsamps=nsamps)
         fig.add_trace(
-            go.Scatter(
-                x=t_arr,
-                y=signal_arr,
-                name=chan.nickname
-            ),
+            go.Scatter(x=t_arr, y=signal_arr, name=chan.nickname),
             row=idx + 1, col=1
         )
 

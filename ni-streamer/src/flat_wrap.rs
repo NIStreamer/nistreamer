@@ -129,26 +129,26 @@ impl StreamerWrap {
 
 // region Device methods
 impl StreamerWrap {
-    fn assert_has_dev(&self, dev_name: &str) -> PyResult<()> {
-        if self.inner.devs().contains_key(dev_name) {
+    fn assert_has_dev(&self, name: &str) -> PyResult<()> {
+        if self.inner.devs().contains_key(name) {
             Ok(())
         } else {
             Err(PyKeyError::new_err(format!(
-                "There is no device with name {dev_name} registered.\n\
+                "There is no device with name {name} registered.\n\
                 The following device names are registered: {:?}",
                 self.inner.devs().keys()
             )))
         }
     }
 
-    pub fn get_dev(&self, dev_name: &str) -> PyResult<&NIDev> {
-        self.assert_has_dev(dev_name)?;
-        Ok(self.inner.devs().get(dev_name).unwrap())
+    pub fn get_dev(&self, name: &str) -> PyResult<&NIDev> {
+        self.assert_has_dev(name)?;
+        Ok(self.inner.devs().get(name).unwrap())
     }
 
-    pub fn get_dev_mut(&mut self, dev_name: &str) -> PyResult<&mut NIDev> {
-        self.assert_has_dev(dev_name)?;
-        Ok(self.inner.devs_mut().get_mut(dev_name).unwrap())
+    pub fn get_dev_mut(&mut self, name: &str) -> PyResult<&mut NIDev> {
+        self.assert_has_dev(name)?;
+        Ok(self.inner.devs_mut().get_mut(name).unwrap())
     }
 }
 
@@ -182,8 +182,16 @@ impl StreamerWrap {
         }
     }
 
-    pub fn dev_clear_edit_cache(&mut self, dev_name: &str) -> PyResult<()> {
-        let typed_dev = self.get_dev_mut(dev_name)?;
+    pub fn dev_last_instr_end_time(&self, name: &str) -> PyResult<f64> {
+        let typed_dev = self.get_dev(name)?;
+        Ok(match typed_dev {
+            NIDev::AO(dev) => dev.last_instr_end_time(),
+            NIDev::DO(dev) => dev.last_instr_end_time(),
+        })
+    }
+
+    pub fn dev_clear_edit_cache(&mut self, name: &str) -> PyResult<()> {
+        let typed_dev = self.get_dev_mut(name)?;
         match typed_dev {
             NIDev::AO(dev) => dev.clear_edit_cache(),
             NIDev::DO(dev) => dev.clear_edit_cache(),
@@ -192,8 +200,8 @@ impl StreamerWrap {
     }
 
     // region Hardware settings
-    pub fn dev_get_samp_rate(&self, dev_name: &str) -> PyResult<f64> {
-        let typed_dev = self.get_dev(dev_name)?;
+    pub fn dev_get_samp_rate(&self, name: &str) -> PyResult<f64> {
+        let typed_dev = self.get_dev(name)?;
         let samp_rate = match typed_dev {
             NIDev::AO(dev) => dev.samp_rate(),
             NIDev::DO(dev) => dev.samp_rate(),
@@ -201,74 +209,74 @@ impl StreamerWrap {
         Ok(samp_rate)
     }
 
-    pub fn dev_get_start_trig_in(&self, dev_name: &str) -> PyResult<Option<String>> {
-        let ni_dev = self.get_dev(dev_name)?;
+    pub fn dev_get_start_trig_in(&self, name: &str) -> PyResult<Option<String>> {
+        let ni_dev = self.get_dev(name)?;
         Ok(ni_dev.hw_cfg().start_trig_in.clone())
     }
 
-    #[pyo3(signature = (dev_name, term))]
-    pub fn dev_set_start_trig_in(&mut self, dev_name: &str, term: Option<String>) -> PyResult<()> {
-        let ni_dev = self.get_dev_mut(dev_name)?;
+    #[pyo3(signature = (name, term))]
+    pub fn dev_set_start_trig_in(&mut self, name: &str, term: Option<String>) -> PyResult<()> {
+        let ni_dev = self.get_dev_mut(name)?;
         ni_dev.hw_cfg_mut().start_trig_in = term;
         Ok(())
     }
 
-    pub fn dev_get_start_trig_out(&self, dev_name: &str) -> PyResult<Option<String>> {
-        let ni_dev = self.get_dev(dev_name)?;
+    pub fn dev_get_start_trig_out(&self, name: &str) -> PyResult<Option<String>> {
+        let ni_dev = self.get_dev(name)?;
         Ok(ni_dev.hw_cfg().start_trig_out.clone())
     }
 
-    #[pyo3(signature = (dev_name, term))]
-    pub fn dev_set_start_trig_out(&mut self, dev_name: &str, term: Option<String>) -> PyResult<()> {
-        let ni_dev = self.get_dev_mut(dev_name)?;
+    #[pyo3(signature = (name, term))]
+    pub fn dev_set_start_trig_out(&mut self, name: &str, term: Option<String>) -> PyResult<()> {
+        let ni_dev = self.get_dev_mut(name)?;
         ni_dev.hw_cfg_mut().start_trig_out = term;
         Ok(())
     }
 
-    pub fn dev_get_samp_clk_in(&self, dev_name: &str) -> PyResult<Option<String>> {
-        let ni_dev = self.get_dev(dev_name)?;
+    pub fn dev_get_samp_clk_in(&self, name: &str) -> PyResult<Option<String>> {
+        let ni_dev = self.get_dev(name)?;
         Ok(ni_dev.hw_cfg().samp_clk_in.clone())
     }
 
-    #[pyo3(signature = (dev_name, term))]
-    pub fn dev_set_samp_clk_in(&mut self, dev_name: &str, term: Option<String>) -> PyResult<()> {
-        let ni_dev = self.get_dev_mut(dev_name)?;
+    #[pyo3(signature = (name, term))]
+    pub fn dev_set_samp_clk_in(&mut self, name: &str, term: Option<String>) -> PyResult<()> {
+        let ni_dev = self.get_dev_mut(name)?;
         ni_dev.hw_cfg_mut().samp_clk_in = term;
         Ok(())
     }
 
-    pub fn dev_get_samp_clk_out(&self, dev_name: &str) -> PyResult<Option<String>> {
-        let ni_dev = self.get_dev(dev_name)?;
+    pub fn dev_get_samp_clk_out(&self, name: &str) -> PyResult<Option<String>> {
+        let ni_dev = self.get_dev(name)?;
         Ok(ni_dev.hw_cfg().samp_clk_out.clone())
     }
 
-    #[pyo3(signature = (dev_name, term))]
-    pub fn dev_set_samp_clk_out(&mut self, dev_name: &str, term: Option<String>) -> PyResult<()> {
-        let ni_dev = self.get_dev_mut(dev_name)?;
+    #[pyo3(signature = (name, term))]
+    pub fn dev_set_samp_clk_out(&mut self, name: &str, term: Option<String>) -> PyResult<()> {
+        let ni_dev = self.get_dev_mut(name)?;
         ni_dev.hw_cfg_mut().samp_clk_out = term;
         Ok(())
     }
 
-    pub fn dev_get_ref_clk_in(&self, dev_name: &str) -> PyResult<Option<String>> {
-        let ni_dev = self.get_dev(dev_name)?;
+    pub fn dev_get_ref_clk_in(&self, name: &str) -> PyResult<Option<String>> {
+        let ni_dev = self.get_dev(name)?;
         Ok(ni_dev.hw_cfg().ref_clk_in.clone())
     }
 
-    #[pyo3(signature = (dev_name, term))]
-    pub fn dev_set_ref_clk_in(&mut self, dev_name: &str, term: Option<String>) -> PyResult<()> {
-        let ni_dev = self.get_dev_mut(dev_name)?;
+    #[pyo3(signature = (name, term))]
+    pub fn dev_set_ref_clk_in(&mut self, name: &str, term: Option<String>) -> PyResult<()> {
+        let ni_dev = self.get_dev_mut(name)?;
         ni_dev.hw_cfg_mut().ref_clk_in = term;
         Ok(())
     }
 
-    pub fn dev_get_min_bufwrite_timeout(&self, dev_name: &str) -> PyResult<Option<f64>> {
-        let ni_dev = self.get_dev(dev_name)?;
+    pub fn dev_get_min_bufwrite_timeout(&self, name: &str) -> PyResult<Option<f64>> {
+        let ni_dev = self.get_dev(name)?;
         Ok(ni_dev.hw_cfg().min_bufwrite_timeout.clone())
     }
 
-    #[pyo3(signature = (dev_name, min_timeout))]
-    pub fn dev_set_min_bufwrite_timeout(&mut self, dev_name: &str, min_timeout: Option<f64>) -> PyResult<()> {
-        let ni_dev = self.get_dev_mut(dev_name)?;
+    #[pyo3(signature = (name, min_timeout))]
+    pub fn dev_set_min_bufwrite_timeout(&mut self, name: &str, min_timeout: Option<f64>) -> PyResult<()> {
+        let ni_dev = self.get_dev_mut(name)?;
         ni_dev.hw_cfg_mut().min_bufwrite_timeout = min_timeout;
         Ok(())
     }
@@ -361,6 +369,16 @@ impl StreamerWrap {
 
 #[pymethods]
 impl StreamerWrap {
+    pub fn ao_chan_name(&self, dev_name: &str, chan_idx: usize) -> PyResult<String> {
+        let chan = self.get_ao_chan(dev_name, chan_idx)?;
+        Ok(chan.name())
+    }
+
+    pub fn do_chan_name(&self, dev_name: &str, port: usize, line: usize) -> PyResult<String> {
+        let chan = self.get_do_chan(dev_name, port, line)?;
+        Ok(chan.name())
+    }
+
     pub fn ao_chan_dflt_val(&self, dev_name: &str, chan_idx: usize) -> PyResult<f64> {
         let chan = self.get_ao_chan(dev_name, chan_idx)?;
         Ok(chan.dflt_val())
@@ -371,31 +389,57 @@ impl StreamerWrap {
         Ok(chan.dflt_val())
     }
 
-    pub fn ao_chan_last_instr_end_time(&self, dev_name: &str, chan_idx: usize) -> PyResult<f64> {
+    pub fn ao_chan_rst_val(&self, dev_name: &str, chan_idx: usize) -> PyResult<f64> {
         let chan = self.get_ao_chan(dev_name, chan_idx)?;
-        Ok(chan.last_instr_end_time())
+        Ok(chan.rst_val())
     }
 
-    pub fn do_chan_last_instr_end_time(&self, dev_name: &str, port: usize, line: usize) -> PyResult<f64> {
+    pub fn do_chan_rst_val(&self, dev_name: &str, port: usize, line: usize) -> PyResult<bool> {
         let chan = self.get_do_chan(dev_name, port, line)?;
-        Ok(chan.last_instr_end_time())
+        Ok(chan.rst_val())
     }
 
-    pub fn ao_chan_clear_edit_cache(&mut self, dev_name: &str, chan_idx: usize) -> PyResult<()> {
-        let chan = self.get_ao_chan_mut(dev_name, chan_idx)?;
-        chan.clear_edit_cache();
-        Ok(())
+    pub fn chan_last_instr_end_time(&self, dev_name: &str, chan_name: &str) -> PyResult<f64> {
+        let dev = self.get_dev(dev_name)?;
+        Ok(match dev {
+            NIDev::AO(dev) => {
+                dev.chans()
+                    .get(chan_name)
+                    .expect(&format!("Channel {chan_name} not found in device {dev_name}"))
+                    .last_instr_end_time()
+            },
+            NIDev::DO(dev) => {
+                dev.chans()
+                    .get(chan_name)
+                    .expect(&format!("Channel {chan_name} not found in device {dev_name}"))
+                    .last_instr_end_time()
+            }
+        })
     }
 
-    pub fn do_chan_clear_edit_cache(&mut self, dev_name: &str, port: usize, line: usize) -> PyResult<()> {
-        let chan = self.get_do_chan_mut(dev_name, port, line)?;
-        chan.clear_edit_cache();
+    pub fn chan_clear_edit_cache(&mut self, dev_name: &str, chan_name: &str) -> PyResult<()> {
+        let dev = self.get_dev_mut(dev_name)?;
+        match dev {
+            NIDev::AO(dev) => {
+                dev.chans_mut()
+                    .get_mut(chan_name)
+                    .expect(&format!("Channel {chan_name} not found in device {dev_name}"))
+                    .clear_edit_cache()
+            },
+            NIDev::DO(dev) => {
+                dev.chans_mut()
+                    .get_mut(chan_name)
+                    .expect(&format!("Channel {chan_name} not found in device {dev_name}"))
+                    .clear_edit_cache()
+            }
+        };
         Ok(())
     }
 
     #[pyo3(signature = (dev_name, chan_idx, func, t, dur_spec))]
     pub fn ao_chan_add_instr(
-        &mut self, dev_name: &str, chan_idx: usize,
+        &mut self,
+        dev_name: &str, chan_idx: usize,
         func: FnBoxF64, t: f64, dur_spec: Option<(f64, bool)>
     ) -> PyResult<()> {
         let chan = self.get_ao_chan_mut(dev_name, chan_idx)?;
@@ -408,7 +452,8 @@ impl StreamerWrap {
 
     #[pyo3(signature = (dev_name, port, line, func, t, dur_spec))]
     pub fn do_chan_add_instr(
-        &mut self, dev_name: &str, port: usize, line: usize,
+        &mut self,
+        dev_name: &str, port: usize, line: usize,
         func: FnBoxBool, t: f64, dur_spec: Option<(f64, bool)>
     ) -> PyResult<()> {
         let chan = self.get_do_chan_mut(dev_name, port, line)?;
@@ -446,26 +491,5 @@ impl StreamerWrap {
             Err(msg) => Err(PyValueError::new_err(msg))
         }
     }
-
-    /*
-
-    pub fn chan_add_instr(&mut self, dev_name: &str, chan_name: &str, t: f64, end_spec: Option<(f64, bool)>, func: /*ToDo*/ f64) {
-        todo!()
-    }
-
-    pub fn channel_clear_edit_cache(&mut self, dev_name: &str, chan_name: &str)
-
-    pub fn channel_last_instr_end_time(&mut self, dev_name: &str, chan_name: &str) -> f64
-
-    pub fn channel_calc_signal_nsamps(
-        &mut self,
-        dev_name: &str,
-        chan_name: &str,
-        start_time: f64,
-        end_time: f64,
-        num_samps: usize,
-    ) -> Vec<f64> {
-        todo!()
-    } */
 }
 // endregion

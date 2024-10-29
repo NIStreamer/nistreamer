@@ -1,29 +1,29 @@
-from niexpctrl_backend import Experiment as RawStreamer
-from .card import AOCardProxy, DOCardProxy
-from typing import Optional, Literal, Union, Tuple
+from nistreamer_backend import StreamerWrap
+from .card import BaseCardProxy, AOCardProxy, DOCardProxy
+from typing import Optional, Literal, Union, Tuple, Type
 
 
 class NIStreamer:
 
     def __init__(self):
-        self._streamer = RawStreamer()
-        self._ao_card_dict = dict()
-        self._do_card_dict = dict()
+        self._streamer = StreamerWrap()
+        self._ao_cards = dict()
+        self._do_cards = dict()
 
     def __getitem__(self, item):
-        if item in self._ao_card_dict.keys():
-            return self._ao_card_dict[item]
-        elif item in self._do_card_dict.keys():
-            return self._do_card_dict[item]
+        if item in self._ao_cards.keys():
+            return self._ao_cards[item]
+        elif item in self._do_cards.keys():
+            return self._do_cards[item]
         else:
-            raise KeyError(f'There is no card with max_name "{item}"')
+            raise KeyError(f'There is no card with max_name "{item}" registered')
 
     def __repr__(self):
         return (
             f'NIStreamer instance\n'
             f'\n'
-            f'AO cards: {list(self._ao_card_dict.keys())}\n'
-            f'DO cards: {list(self._do_card_dict.keys())}\n'
+            f'AO cards: {list(self._ao_cards.keys())}\n'
+            f'DO cards: {list(self._do_cards.keys())}\n'
             f'\n'
             f'Hardware settings:\n'
             f'\t10MHz ref provider: {self.ref_clk_provider}\n'
@@ -45,20 +45,21 @@ class NIStreamer:
             card_type: Literal['AO', 'DO'],
             max_name: str,
             samp_rate: float,
+            proxy_class: Type[BaseCardProxy],
             nickname: Optional[str] = None,
-            proxy_class=None
-    ):
+     ) -> BaseCardProxy:
+
         if card_type == 'AO':
-            raw_streamer_method = RawStreamer.add_ao_device
-            target_dict = self._ao_card_dict
+            streamer_method = StreamerWrap.add_ao_dev
+            target_dict = self._ao_cards
         elif card_type == 'DO':
-            raw_streamer_method = RawStreamer.add_do_device
-            target_dict = self._do_card_dict
+            streamer_method = StreamerWrap.add_do_dev
+            target_dict = self._do_cards
         else:
             raise ValueError(f'Invalid card type "{card_type}". Valid type strings are "AO" and "DO"')
 
-        # Raw (maturin wrapped) Rust NIStreamer call
-        raw_streamer_method(
+        # Call to NIStreamer struct in the compiled Rust backend
+        streamer_method(
             self._streamer,
             name=max_name,
             samp_rate=samp_rate
@@ -77,8 +78,16 @@ class NIStreamer:
             max_name: str,
             samp_rate: float,
             nickname: Optional[str] = None,
-            proxy_class=AOCardProxy
+            proxy_class: Optional[Type[BaseCardProxy]] = AOCardProxy
     ):
+        """Add a digital output card to NIStreamer
+
+        :param max_name: name of the card as shown in NI MAX
+        :param samp_rate: sample rate in Hz
+        :param nickname: (optional) human-readable name (e.g. "Fast AO card"; used for pulse sequence visualization)
+        :param proxy_class: (optional) custom subclass of `BaseDevProxy` to use for the device proxy
+        :return: proxy_class instance
+        """
         return self._add_card(
             card_type='AO',
             max_name=max_name,
@@ -92,8 +101,16 @@ class NIStreamer:
             max_name: str,
             samp_rate: float,
             nickname: Optional[str] = None,
-            proxy_class=DOCardProxy
+            proxy_class: Optional[Type[BaseCardProxy]] = DOCardProxy
     ):
+        """Add an analog output card to NIStreamer
+
+        :param max_name: name of the card as shown in NI MAX
+        :param samp_rate: sample rate in Hz
+        :param nickname: (optional) human-readable name (e.g. "Main DO card"; used for pulse sequence visualization)
+        :param proxy_class: (optional) custom subclass of `BaseDevProxy` to use for the device proxy
+        :return: proxy_class instance
+        """
         return self._add_card(
             card_type='DO',
             max_name=max_name,
@@ -132,7 +149,7 @@ class NIStreamer:
         """Specifies which card exports its 10MHz reference signal for use by all other cards.
 
         Format:
-            * `(dev_name: str, term_name: str)` - card `dev_name` exports 10MHz ref to terminal `term_name`
+            * `(card_name: str, term_name: str)` - card `card_name` exports 10MHz ref to terminal `term_name`
             * `None` - no card exports
 
         Technical details:
@@ -159,7 +176,7 @@ class NIStreamer:
     def compile(self, stop_time: Optional[float] = None) -> float:
         return self._streamer.compile(stop_time=stop_time)
 
-    def run(self, nreps: Optional[int] = 1,  bufsize_ms: Optional[float] = 150) -> None:
+    def run(self, nreps: Optional[int] = 1, bufsize_ms: Optional[float] = 150) -> None:
         try:
             self._streamer.cfg_run(bufsize_ms=bufsize_ms)
             for i in range(nreps):
@@ -172,9 +189,6 @@ class NIStreamer:
 
     def clear_edit_cache(self):
         self._streamer.clear_edit_cache()
-        self._streamer.clear_compile_cache()
 
     def reset_all(self):
-        for card_group in [self._ao_card_dict.values(), self._do_card_dict.values()]:
-            for card in card_group:
-                card.reset()
+        self._streamer.reset_all()
