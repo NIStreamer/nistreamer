@@ -37,7 +37,7 @@ use base_streamer::channel::BaseChan;
 use base_streamer::device::BaseDev;
 use base_streamer::streamer::TypedDev;
 
-use crate::channel::{AOChan, DOChan};
+use crate::channel::{AOChan, DOChan, DOPortChan};
 use crate::nidaqmx::*;
 use crate::utils::StreamCounter;
 use crate::worker_cmd_chan::{CmdRecvr, WorkerCmd};
@@ -99,6 +99,16 @@ pub struct StreamBundle<T> {
     */
 }
 
+pub enum SampBufs {
+    AO(Vec<f64>),
+    DOLinesPorts((Vec<bool>, Vec<u32>)),
+    DOPorts(Vec<u32>)
+}
+
+// pub struct SampBufs {
+//
+// }
+
 pub struct HwCfg {
     pub start_trig_in: Option<String>,
     pub start_trig_out: Option<String>,
@@ -152,7 +162,12 @@ where
     ///
     /// The channel names are constructed using the format `/{device_name}/{channel_name}`.
     fn create_task_chans(&self, task: &NiTask) -> Result<(), DAQmxError>;
-    fn write_buf(&self, stream_bundle: &mut StreamBundle<T>, samp_num: usize) -> Result<usize, DAQmxError>;
+    fn alloc_samp_bufs(&self) -> SampBufs;
+    fn calc_samps_(&self, samp_bufs: &mut SampBufs, start_pos: usize, end_pos: usize) -> Result<(), String>;
+    fn write_buf(&self, stream_bundle: &mut StreamBundle<T>, samp_bufs: &SampBufs, samp_num: usize) -> Result<usize, DAQmxError>;
+    //      to remove dependency on `trait BaseDev<T>` and remove type parameter `T`:
+    // fn total_samps(self) -> usize;
+    // self.compiled_chans().len()
 
     /// Streams an instruction signal to the specified NI-DAQ device.
     ///
@@ -258,11 +273,12 @@ where
 
         // Calc and write the initial sample chunk into the buffer
         let (start_pos, end_pos) = stream_bundle.counter.tick_next().unwrap();
-        self.calc_samps(
-            &mut stream_bundle.samp_buf[..],
-            start_pos,
-            end_pos
-        )?;
+        self.calc_samps_(&mut stream_bundle, start_pos, end_pos)?;
+        // self.calc_samps(
+        //     &mut stream_bundle,
+        //     start_pos,
+        //     end_pos
+        // )?;
         self.write_buf(&mut stream_bundle, end_pos - start_pos)?;
 
         Ok(stream_bundle)
@@ -473,6 +489,8 @@ pub struct DODev {
     samp_rate: f64,
     chans: IndexMap<String, DOChan>,
     hw_cfg: HwCfg,
+    const_fns_only: bool,
+    port_chans: Option<IndexMap<String, DOPortChan>>
 }
 
 impl DODev {
@@ -482,6 +500,8 @@ impl DODev {
             samp_rate,
             chans: IndexMap::new(),
             hw_cfg: HwCfg::dflt(),
+            const_fns_only: false,
+            port_chans: None,
         }
     }
 
@@ -527,6 +547,14 @@ impl BaseDev<bool, DOChan> for DODev {
 
     fn chans_mut(&mut self) -> &mut IndexMap<String, DOChan> {
         &mut self.chans
+    }
+
+    fn compile(&mut self, stop_time: f64) -> Result<f64, String> {
+        let total_run_time = BaseDev::compile_base(self, stop_time)?;
+
+        // ToDo: line -> port merging
+
+        Ok(total_run_time)
     }
 }
 

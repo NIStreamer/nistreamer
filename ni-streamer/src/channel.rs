@@ -172,4 +172,8 @@ impl BaseChan<bool> for DOChan {
         &mut self.compile_cache_fns
     }
 }
+
+pub struct DOPortChan {
+    // ToDo
+}
 // endregion
