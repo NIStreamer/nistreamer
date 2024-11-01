@@ -27,6 +27,7 @@
 //! - **Clock Configuration**: Sets up the sample clock, start trigger, and reference clocking for devices.
 //! - **Task Channel Configuration**: Configures the task channels based on the device's task type.
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::fmt::Debug;
 use std::sync::mpsc::{Sender, Receiver, SendError, RecvError};
 
@@ -37,7 +38,7 @@ use base_streamer::channel::BaseChan;
 use base_streamer::device::BaseDev;
 use base_streamer::streamer::TypedDev;
 
-use crate::channel::{AOChan, DOChan, DOPortChan};
+use crate::channel::{AOChan, DOChan, DOPort};
 use crate::nidaqmx::*;
 use crate::utils::StreamCounter;
 use crate::worker_cmd_chan::{CmdRecvr, WorkerCmd};
@@ -83,20 +84,10 @@ impl ToString for WorkerError {
     }
 }
 
-pub struct StreamBundle<T> {
+pub struct StreamBundle {
     ni_task: NiTask,
     counter: StreamCounter,
     buf_write_timeout: Option<f64>,  // Some(finite_timeout_in_seconds) or None - wait infinitely
-    samp_buf: Vec<T>,
-    port_samp_buf: Option<Vec<u32>>,  // FixMe: this is a dirty hack:
-    /*
-        port_samp_buf is used by DODev for merging line samp_arr into port samp_arr.
-
-        Since AO does not need it, it should not be contained in StreamBundle.
-        The clean alternative - store it as a field in DODev. But a question there:
-        - port_samp_buf Array1 will be stored in the main thread RAM while samp_arr - in worker thread RAM.
-          Is accessing Array across threads slower?
-    */
 }
 
 pub enum SampBufs {
@@ -104,10 +95,6 @@ pub enum SampBufs {
     DOLinesPorts((Vec<bool>, Vec<u32>)),
     DOPorts(Vec<u32>)
 }
-
-// pub struct SampBufs {
-//
-// }
 
 pub struct HwCfg {
     pub start_trig_in: Option<String>,
@@ -161,13 +148,14 @@ where
     /// `create_do_chan` method for each channel.
     ///
     /// The channel names are constructed using the format `/{device_name}/{channel_name}`.
+    // fn total_samp_num(&self) -> usize;
+
     fn create_task_chans(&self, task: &NiTask) -> Result<(), DAQmxError>;
-    fn alloc_samp_bufs(&self) -> SampBufs;
+    fn alloc_samp_bufs(&self, buf_size: usize) -> SampBufs;
     fn calc_samps_(&self, samp_bufs: &mut SampBufs, start_pos: usize, end_pos: usize) -> Result<(), String>;
-    fn write_buf(&self, stream_bundle: &mut StreamBundle<T>, samp_bufs: &SampBufs, samp_num: usize) -> Result<usize, DAQmxError>;
+    fn write_to_hardware(&self, bundle: &mut StreamBundle, bufs: &SampBufs, samp_num: usize) -> Result<usize, DAQmxError>;
     //      to remove dependency on `trait BaseDev<T>` and remove type parameter `T`:
     // fn total_samps(self) -> usize;
-    // self.compiled_chans().len()
 
     /// Streams an instruction signal to the specified NI-DAQ device.
     ///
@@ -216,13 +204,13 @@ where
         report_sendr: Sender<()>,
         start_sync: StartSync,
     ) -> Result<(), WorkerError> {
-        let mut stream_bundle = self.cfg_run_(bufsize_ms)?;
+        let (mut stream_bundle, mut samp_bufs) = self.cfg_run_(bufsize_ms)?;
         report_sendr.send(())?;
 
         loop {
             match cmd_recvr.recv()? {
                 WorkerCmd::Stream(calc_next) => {
-                    self.stream_run_(&mut stream_bundle, &start_sync, calc_next)?;
+                    self.stream_run_(&mut stream_bundle, &mut samp_bufs, &start_sync, calc_next)?;
                     report_sendr.send(())?;
                 },
                 WorkerCmd::Close => {
@@ -232,7 +220,7 @@ where
         };
         Ok(())
     }
-    fn cfg_run_(&self, bufsize_ms: f64) -> Result<StreamBundle<T>, WorkerError> {
+    fn cfg_run_(&self, bufsize_ms: f64) -> Result<(StreamBundle, SampBufs), WorkerError> {
         let buf_dur = bufsize_ms / 1000.0;
         let buf_write_timeout = match &self.hw_cfg().min_bufwrite_timeout {
             Some(min_timeout) => Some(f64::max(10.0*buf_dur, *min_timeout)),
@@ -244,12 +232,8 @@ where
             seq_len,
             (buf_dur * self.samp_rate()).round() as usize,
         );
+        let mut samp_buf = self.alloc_samp_bufs(buf_size);
         let counter = StreamCounter::new(seq_len, buf_size);
-
-        let samp_buf = vec![
-            self.chans().values().next().unwrap().dflt_val();
-            self.compiled_chans().len() * buf_size
-        ];
 
         // DAQmx Setup
         let task = NiTask::new()?;
@@ -263,27 +247,22 @@ where
             ni_task: task,
             counter,
             buf_write_timeout,
-            samp_buf,
-            port_samp_buf: None,  // FixMe: this is a dirty hack.
-            /* AO card will ignore `port_samp_buf`.
-               DO card will set it to `Some(Array1<u32>)` the first time `self.write_buf()` is called
-               and will re-use it for line-port merging.
-            */
         };
 
         // Calc and write the initial sample chunk into the buffer
         let (start_pos, end_pos) = stream_bundle.counter.tick_next().unwrap();
-        self.calc_samps_(&mut stream_bundle, start_pos, end_pos)?;
-        // self.calc_samps(
-        //     &mut stream_bundle,
-        //     start_pos,
-        //     end_pos
-        // )?;
-        self.write_buf(&mut stream_bundle, end_pos - start_pos)?;
+        self.calc_samps_(&mut samp_buf, start_pos, end_pos)?;
+        self.write_to_hardware(&mut stream_bundle, &samp_buf, end_pos - start_pos)?;
 
-        Ok(stream_bundle)
+        Ok((stream_bundle, samp_buf))
     }
-    fn stream_run_(&self, stream_bundle: &mut StreamBundle<T>, start_sync: &StartSync, calc_next: bool) -> Result<(), WorkerError> {
+    fn stream_run_(
+        &self,
+        stream_bundle: &mut StreamBundle,
+        samp_bufs: &mut SampBufs,
+        start_sync: &StartSync,
+        calc_next: bool
+    ) -> Result<(), WorkerError> {
         // Synchronise task start with other threads
         match start_sync {
             StartSync::Primary(recvr_vec) => {
@@ -301,12 +280,8 @@ where
 
         // Main streaming loop
         while let Some((start_pos, end_pos)) = stream_bundle.counter.tick_next() {
-            self.calc_samps(
-                &mut stream_bundle.samp_buf[..],
-                start_pos,
-                end_pos
-            )?;
-            self.write_buf(stream_bundle, end_pos - start_pos)?;
+            self.calc_samps_(&mut samp_buf, start_pos, end_pos)?;
+            self.write_to_hardware(stream_bundle, samp_bufs, end_pos - start_pos)?;
         }
 
         // Now need to wait for the final sample chunk to be generated out by the card before stopping the task.
@@ -317,16 +292,12 @@ where
         } else {
             stream_bundle.counter.reset();
             let (start_pos, end_pos) = stream_bundle.counter.tick_next().unwrap();
-            self.calc_samps(
-                &mut stream_bundle.samp_buf[..],
-                start_pos,
-                end_pos
-            )?;
+            self.calc_samps_(samp_bufs, start_pos, end_pos)?;
 
             stream_bundle.ni_task.wait_until_done(stream_bundle.buf_write_timeout.clone())?;
             stream_bundle.ni_task.stop()?;
 
-            self.write_buf(stream_bundle, end_pos - start_pos)?;
+            self.write_to_hardware(stream_bundle, samp_bufs, end_pos - start_pos)?;
         }
         Ok(())
     }
@@ -473,11 +444,29 @@ impl StreamDev<f64, AOChan> for AODev {
         Ok(())
     }
 
-    fn write_buf(&self, stream_bundle: &mut StreamBundle<f64>, samp_num: usize) -> Result<usize, DAQmxError> {
-        stream_bundle.ni_task.write_analog(
-            &stream_bundle.samp_buf[..],
+    fn alloc_samp_bufs(&self, buf_size: usize) -> SampBufs {
+        SampBufs::AO(
+            vec![0.0; buf_size * self.compiled_chans().len()]
+        )
+    }
+
+    fn calc_samps_(&self, samp_bufs: &mut SampBufs, start_pos: usize, end_pos: usize) -> Result<(), String> {
+        let samp_buf = match samp_bufs {
+            SampBufs::AO(samp_buf) => samp_buf,
+            _ => return Err("AODev::calc_samps_() received incorrect `SampBufs` variant".to_string()),
+        };
+        self.calc_samps(&mut samp_buf[..], start_pos, end_pos)
+    }
+
+    fn write_to_hardware(&self, bundle: &mut StreamBundle, bufs: &SampBufs, samp_num: usize) -> Result<usize, DAQmxError> {
+        let samp_buf = match bufs {
+            SampBufs::AO(buf) => buf,
+            _ => return Err(DAQmxError::new("AODev::write_to_card() received incorrect `SampBufs` variant".to_string())),
+        };
+        bundle.ni_task.write_analog(
+            &samp_buf[..],
             samp_num,
-            stream_bundle.buf_write_timeout.clone()
+            bundle.buf_write_timeout.clone()
         )
     }
 }
@@ -490,7 +479,7 @@ pub struct DODev {
     chans: IndexMap<String, DOChan>,
     hw_cfg: HwCfg,
     const_fns_only: bool,
-    port_chans: Option<IndexMap<String, DOPortChan>>
+    port_chans: Option<IndexMap<usize, DOPort>>
 }
 
 impl DODev {
@@ -554,6 +543,69 @@ impl BaseDev<bool, DOChan> for DODev {
 
         // ToDo: line -> port merging
 
+        // (1) Group line channels into ports
+        let mut port_map = IndexMap::new();
+        for chan in self.compiled_chans() {
+            let port_num = chan.port();
+            let line_num = chan.line();
+
+            if !port_map.contains_key(&port_num) {
+                port_map.insert(port_num, IndexMap::new())
+            }
+
+            port_map.get_mut(&port_num).unwrap().insert(line_num, chan);
+        }
+        // Sort ports and sort lines within each port
+        port_map.sort_by(|port_num1, _v1, port_num2, _v2| port_num1.cmp(port_num2));
+        for line_map in port_map.values_mut() {
+            line_map.sort_by(|line_num1, _v1, line_num2, _v2| line_num1.cmp(line_num2))
+        }
+
+        // (2) Merge lines for each port
+        for (&port_num, line_map) in port_map.iter() {
+            // Collect instruction ends from all the line channels into one joint vector
+            // let mut port_instr_ends: Vec<usize> = Vec::new();
+            let mut port_instr_ends = BTreeSet::new();
+            for chan in line_map.values() {
+                port_instr_ends.extend(chan.compile_cache_ends())  // ToDo: test behavior
+            }
+            // port_instr_ends.sort();
+            // port_instr_ends.dedup();
+            let port_instr_ends: Vec<_> = port_instr_ends.into_iter().collect();// Vec::from(port_instr_ends);
+
+            // Vector to store final instruction values for the port
+            let mut port_instr_vals: Vec<u32> = vec![0; port_instr_ends.len()];
+
+            for (&line_num, chan) in line_map.iter() {
+                let mut previous_line_instr_end = 0;
+                for (&line_instr_end, line_instr_func) in chan.compile_cache_ends().iter().zip(chan.compile_cache_fns().iter()) {
+                    // Extract the (constant) instruction value by evaluating the function object at some point
+                    // The actual value of `t` should not matter - just make-up some one-element `t_arr` and `res_arr` to feed into `calc()`
+                    let t_arr = [previous_line_instr_end as f64 * self.clk_period()];
+                    let mut res_arr = [false];
+                    line_instr_func.calc(&t_arr, &mut res_arr);
+                    let const_val = res_arr[0];
+
+                    // Find all the covered port-instruction intervals and add this contribution
+                    let leftmost_idx = port_instr_ends.binary_search(&previous_line_instr_end).unwrap();  // ToDo: test binary_search() behavior
+                    let rightmost_idx = port_instr_ends.binary_search(&line_instr_end).unwrap();
+
+                    let line_contrib = (const_val as u32) << (line_num as u32);
+                    for port_instr_val in &mut port_instr_vals[leftmost_idx..rightmost_idx] {  // ToDo: check indices
+                        *port_instr_val |= line_contrib;
+                    }
+                }
+            }
+
+            // Create the port instance and store obtained compile cache
+            let port_instance = DOPort{
+                idx: port_num,
+                instr_ends: port_instr_ends,
+                instr_vals: port_instr_vals
+            };
+            self.port_chans.as_mut().unwrap().insert(port_num, port_instance);
+        }
+
         Ok(total_run_time)
     }
 }
@@ -576,8 +628,63 @@ impl StreamDev<bool, DOChan> for DODev {
         Ok(())
     }
 
-    fn write_buf(&self, bundle: &mut StreamBundle<bool>, samp_num: usize) -> Result<usize, DAQmxError> {
-        // Sanity check - requested samp_num is not too large
+    fn alloc_samp_bufs(&self, buf_size: usize) -> SampBufs {
+        if self.const_fns_only {
+            SampBufs::DOPorts(
+                vec![0_u32; buf_size * self.compiled_port_nums().len()]
+            )
+        } else {
+            SampBufs::DOLinesPorts((
+                vec![false; buf_size * self.compiled_chans().len()],
+                vec![0_u32; buf_size * self.compiled_port_nums().len()]
+            ))
+        }
+    }
+
+    fn calc_samps_(&self, samp_bufs: &mut SampBufs, start_pos: usize, end_pos: usize) -> Result<(), String> {
+        let samp_num = end_pos - start_pos;
+        if self.const_fns_only {
+            let port_samp_buf = match samp_bufs {
+                SampBufs::DOPorts(buf) => buf,
+                _ => return Err("DODev::calc_samps_() received incorrect `SampBufs` variant".to_string()),
+            };
+            // ToDo: sanity checks
+            for (port_row_idx, port) in self.port_chans.as_ref().unwrap().values().enumerate() {
+                let port_slice = &mut port_samp_buf[port_row_idx * samp_num .. (port_row_idx + 1) * samp_num];
+                port.calc_samps(port_slice, start_pos, end_pos)?;
+            }
+        } else {
+            let (line_samp_buf, port_samp_buf) = match samp_bufs {
+                SampBufs::DOLinesPorts((lines, ports)) => (lines, ports),
+                _ => return Err("DODev::calc_samps_() received incorrect `SampBufs` variant".to_string()),
+            };
+
+            // (1) Calculate samples for each line
+            self.calc_samps(&mut line_samp_buf[..], start_pos, end_pos)?;
+
+            // (2) Merge lines into ports
+            port_samp_buf.fill(0);  // clear previous values in the buffer
+
+            for (port_row_idx, &port_num) in self.compiled_port_nums().iter().enumerate() {
+                let port_slice = &mut port_samp_buf[port_row_idx * samp_num .. (port_row_idx + 1) * samp_num];
+
+                for (chan_row_idx, chan) in self.compiled_chans().iter().enumerate() {
+                    if chan.port() != port_num {
+                        continue
+                    }
+                    let chan_slice = &line_samp_buf[chan_row_idx * samp_num .. (chan_row_idx + 1) * samp_num];
+                    let line_idx = chan.line();
+                    for (res, &samp) in port_slice.iter_mut().zip(chan_slice.iter()) {
+                        *res |= (samp as u32) << line_idx;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn write_to_hardware(&self, bundle: &mut StreamBundle, bufs: &SampBufs, samp_num: usize) -> Result<usize, DAQmxError> {
+        /*// Sanity check - requested samp_num is not too large
         if bundle.samp_buf.len() < self.compiled_chans().len() * samp_num {
             return Err(DAQmxError::new(format!(
                 "[write_buf()] BUG:\n\
@@ -587,9 +694,16 @@ impl StreamDev<bool, DOChan> for DODev {
                 samp_num * self.compiled_chans().len(),
                 bundle.samp_buf.len()
             )))
-        }
+        }*/
+        // ToDo: sanity checks
 
-        // (1) Merge lines into ports
+        let port_samp_buf = match bufs {
+            SampBufs::DOPorts(buf) => buf,
+            SampBufs::DOLinesPorts((_lines, ports)) => ports,
+            _ => return Err(DAQmxError::new("DODev::write_to_card() received incorrect `SampBufs` variant".to_string()))
+        };
+
+        /*// (1) Merge lines into ports
         match bundle.port_samp_buf.as_mut() {
             None => {
                 // This is the first-time write_buf() call during cfg_run() - allocate the new Vec
@@ -628,11 +742,11 @@ impl StreamDev<bool, DOChan> for DODev {
                     *res |= (samp as u32) << line_idx;
                 }
             }
-        }
+        }*/
 
-        // (2) Write to buffer
+        // Write to buffer
         let samps_written = bundle.ni_task.write_digital_port(
-            &bundle.port_samp_buf.as_ref().unwrap()[..],
+            &port_samp_buf[..],
             samp_num,
             bundle.buf_write_timeout.clone()
         )?;

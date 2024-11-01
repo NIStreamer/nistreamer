@@ -173,7 +173,14 @@ impl BaseChan<bool> for DOChan {
     }
 }
 
-pub struct DOPortChan {
-    // ToDo
+pub struct DOPort {
+    pub idx: usize,
+    pub instr_ends: Vec<usize>,
+    pub instr_vals: Vec<u32>,
+}
+impl DOPort {
+    pub fn calc_samps(&self, samp_buf: &mut [u32], start_pos: usize, end_pos: usize) -> Result<(), String> {
+        todo!()
+    }
 }
 // endregion
