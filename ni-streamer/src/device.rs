@@ -28,6 +28,7 @@
 //! - **Task Channel Configuration**: Configures the task channels based on the device's task type.
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
+use std::iter::zip;
 use std::fmt::Debug;
 use std::sync::mpsc::{Sender, Receiver, SendError, RecvError};
 
@@ -479,7 +480,7 @@ pub struct DODev {
     chans: IndexMap<String, DOChan>,
     hw_cfg: HwCfg,
     const_fns_only: bool,
-    port_chans: Option<IndexMap<usize, DOPort>>
+    compiled_ports: Option<IndexMap<usize, DOPort>>
 }
 
 impl DODev {
@@ -490,7 +491,7 @@ impl DODev {
             chans: IndexMap::new(),
             hw_cfg: HwCfg::dflt(),
             const_fns_only: false,
-            port_chans: None,
+            compiled_ports: None,
         }
     }
 
@@ -511,14 +512,15 @@ impl DODev {
         Ok(())
     }
 
-    pub fn compiled_port_nums(&self) -> Vec<usize> {
+    // ToDo: probably remove since `self.compiled_ports` field has been introduced
+    /* pub fn compiled_port_nums(&self) -> Vec<usize> {
         self.compiled_chans()
             .iter()
             .map(|chan| chan.port())
             .unique()
             .sorted()
             .collect()
-    }
+    }*/
 }
 
 impl BaseDev<bool, DOChan> for DODev {
@@ -540,10 +542,17 @@ impl BaseDev<bool, DOChan> for DODev {
 
     fn compile(&mut self, stop_time: f64) -> Result<f64, String> {
         let total_run_time = BaseDev::compile_base(self, stop_time)?;
+        if !self.const_fns_only {
+            // Generic instruction case - cannot do line->port merging at compile time. Will have to merge samples on-the-fly during streaming.
+            return Ok(total_run_time)
+        }
 
-        // ToDo: line -> port merging
+        // Line -> port merging
+        //      For "const-instruction only" case, do the line->port merging now, at compile time,
+        //      to significantly reduce computational load during streaming.
+        self.compiled_ports = Some(IndexMap::new());
 
-        // (1) Group line channels into ports
+        // (1) Group line channels by ports for convenience
         let mut port_map = IndexMap::new();
         for chan in self.compiled_chans() {
             let port_num = chan.port();
@@ -555,55 +564,58 @@ impl BaseDev<bool, DOChan> for DODev {
 
             port_map.get_mut(&port_num).unwrap().insert(line_num, chan);
         }
-        // Sort ports and sort lines within each port
-        port_map.sort_by(|port_num1, _v1, port_num2, _v2| port_num1.cmp(port_num2));
+        // Sort ports within the map and lines within each port
+        port_map.sort_by(|k1, _v1, k2, _v2| k1.cmp(k2));
         for line_map in port_map.values_mut() {
-            line_map.sort_by(|line_num1, _v1, line_num2, _v2| line_num1.cmp(line_num2))
+            line_map.sort_by(|k1, _v1, k2, _v2| k1.cmp(k2))
         }
 
         // (2) Merge lines for each port
         for (&port_num, line_map) in port_map.iter() {
-            // Collect instruction ends from all the line channels into one joint vector
-            // let mut port_instr_ends: Vec<usize> = Vec::new();
+            // Collect instruction ends from all the lines of this port into one joint vector
             let mut port_instr_ends = BTreeSet::new();
             for chan in line_map.values() {
-                port_instr_ends.extend(chan.compile_cache_ends())  // ToDo: test behavior
+                port_instr_ends.extend(chan.compile_cache_ends())
             }
-            // port_instr_ends.sort();
-            // port_instr_ends.dedup();
-            let port_instr_ends: Vec<_> = port_instr_ends.into_iter().collect();// Vec::from(port_instr_ends);
+            let port_instr_ends: Vec<usize> = port_instr_ends.into_iter().collect();
 
             // Vector to store final instruction values for the port
-            let mut port_instr_vals: Vec<u32> = vec![0; port_instr_ends.len()];
+            let mut port_instr_vals = vec![0_u32; port_instr_ends.len()];
 
             for (&line_num, chan) in line_map.iter() {
-                let mut previous_line_instr_end = 0;
-                for (&line_instr_end, line_instr_func) in chan.compile_cache_ends().iter().zip(chan.compile_cache_fns().iter()) {
+                let line_compile_cache = zip(
+                    chan.compile_cache_ends(),
+                    chan.compile_cache_fns()
+                );
+                let mut leftmost_covered_idx = 0;
+                for (&line_instr_end, line_instr_fn) in line_compile_cache {
                     // Extract the (constant) instruction value by evaluating the function object at some point
                     // The actual value of `t` should not matter - just make-up some one-element `t_arr` and `res_arr` to feed into `calc()`
-                    let t_arr = [previous_line_instr_end as f64 * self.clk_period()];
+                    let t_arr = [0.0_f64];
                     let mut res_arr = [false];
-                    line_instr_func.calc(&t_arr, &mut res_arr);
+                    line_instr_fn.calc(&t_arr, &mut res_arr);
                     let const_val = res_arr[0];
 
-                    // Find all the covered port-instruction intervals and add this contribution
-                    let leftmost_idx = port_instr_ends.binary_search(&previous_line_instr_end).unwrap();  // ToDo: test binary_search() behavior
-                    let rightmost_idx = port_instr_ends.binary_search(&line_instr_end).unwrap();
+                    // Find all the port instructions covered by this line instruction and add its' contribution
+                    let rightmost_covered_idx = port_instr_ends.binary_search(&line_instr_end).unwrap();
 
                     let line_contrib = (const_val as u32) << (line_num as u32);
-                    for port_instr_val in &mut port_instr_vals[leftmost_idx..rightmost_idx] {  // ToDo: check indices
+                    for port_instr_val in &mut port_instr_vals[leftmost_covered_idx..rightmost_covered_idx+1] {
                         *port_instr_val |= line_contrib;
                     }
+
+                    leftmost_covered_idx = rightmost_covered_idx + 1;
                 }
+                assert_eq!(leftmost_covered_idx, port_instr_ends.len());
             }
 
             // Create the port instance and store obtained compile cache
-            let port_instance = DOPort{
+            let compiled_port = DOPort{
                 idx: port_num,
                 instr_ends: port_instr_ends,
                 instr_vals: port_instr_vals
             };
-            self.port_chans.as_mut().unwrap().insert(port_num, port_instance);
+            self.compiled_ports.as_mut().unwrap().insert(port_num, compiled_port);
         }
 
         Ok(total_run_time)
@@ -649,7 +661,7 @@ impl StreamDev<bool, DOChan> for DODev {
                 _ => return Err("DODev::calc_samps_() received incorrect `SampBufs` variant".to_string()),
             };
             // ToDo: sanity checks
-            for (port_row_idx, port) in self.port_chans.as_ref().unwrap().values().enumerate() {
+            for (port_row_idx, port) in self.compiled_ports.as_ref().unwrap().values().enumerate() {
                 let port_slice = &mut port_samp_buf[port_row_idx * samp_num .. (port_row_idx + 1) * samp_num];
                 port.calc_samps(port_slice, start_pos, end_pos)?;
             }
