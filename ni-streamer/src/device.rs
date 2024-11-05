@@ -540,7 +540,16 @@ impl BaseDev<bool, DOChan> for DODev {
         &mut self.chans
     }
 
+    fn clear_compile_cache(&mut self) {
+        for chan in self.chans_mut().values_mut() {
+            chan.clear_compile_cache()
+        }
+        self.compiled_ports = None;
+    }
+
     fn compile(&mut self, stop_time: f64) -> Result<f64, String> {
+        self.clear_compile_cache();
+
         let total_run_time = BaseDev::compile_base(self, stop_time)?;
         if !self.const_fns_only {
             // Generic instruction case - cannot do line->port merging at compile time. Will have to merge samples on-the-fly during streaming.
