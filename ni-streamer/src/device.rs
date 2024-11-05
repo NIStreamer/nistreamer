@@ -512,15 +512,35 @@ impl DODev {
         Ok(())
     }
 
-    // ToDo: probably remove since `self.compiled_ports` field has been introduced
-    /* pub fn compiled_port_nums(&self) -> Vec<usize> {
-        self.compiled_chans()
+    /// Note: there are _running_ ports no matter if `const_fns_only` mode is used or not.
+    /// This function returns the numbers of the ports which will be added to NI task.
+    ///
+    /// * If `const_fn_only = true`, line->port merging was done during `BaseDev::compile()`
+    ///   and port compile cache was stored in `DOPort` instances.
+    ///
+    /// * If `const_fn_only = false`, there are no "compiled" port instances after `BaseDev::compile()`
+    ///   and line->port merging will have to be done sample-by-sample during `StreamDev::calc_samps_()`,
+    ///   BUT there are still running ports and this function returns their numbers.
+    pub fn running_port_nums(&self) -> Vec<usize> {
+        let running_port_nums_ = self.compiled_chans()
             .iter()
             .map(|chan| chan.port())
             .unique()
             .sorted()
-            .collect()
-    }*/
+            .collect();
+
+        // Consistency check if `const_fns_only` is used
+        if self.const_fns_only {
+            let compiled_port_nums: Vec<usize> = self.compiled_ports
+                .as_ref()
+                .unwrap()
+                .keys()
+                .collect();
+            assert_eq!(running_port_nums_, compiled_port_nums)
+        }
+
+        return running_port_nums_
+    }
 }
 
 impl BaseDev<bool, DOChan> for DODev {
@@ -643,7 +663,7 @@ impl CommonHwCfg for DODev {
 
 impl StreamDev<bool, DOChan> for DODev {
     fn create_task_chans(&self, task: &NiTask) -> Result<(), DAQmxError> {
-        for port_num in self.compiled_port_nums() {
+        for port_num in self.running_port_nums() {
             task.create_do_chan(&format!("/{}/port{}", self.name(), port_num))?;
         }
         Ok(())
@@ -652,18 +672,22 @@ impl StreamDev<bool, DOChan> for DODev {
     fn alloc_samp_bufs(&self, buf_size: usize) -> SampBufs {
         if self.const_fns_only {
             SampBufs::DOPorts(
-                vec![0_u32; buf_size * self.compiled_port_nums().len()]
+                vec![0_u32; buf_size * self.running_port_nums().len()]
             )
         } else {
             SampBufs::DOLinesPorts((
                 vec![false; buf_size * self.compiled_chans().len()],
-                vec![0_u32; buf_size * self.compiled_port_nums().len()]
+                vec![0_u32; buf_size * self.running_port_nums().len()]
             ))
         }
     }
 
     fn calc_samps_(&self, samp_bufs: &mut SampBufs, start_pos: usize, end_pos: usize) -> Result<(), String> {
         let samp_num = end_pos - start_pos;
+
+        // (a) Case of constant-only functions.
+        //  Line->port merging should have already been done during compilation.
+        //  Now only need to calculate samples using already-compiled port channels
         if self.const_fns_only {
             let port_samp_buf = match samp_bufs {
                 SampBufs::DOPorts(buf) => buf,
@@ -674,19 +698,25 @@ impl StreamDev<bool, DOChan> for DODev {
                 let port_slice = &mut port_samp_buf[port_row_idx * samp_num .. (port_row_idx + 1) * samp_num];
                 port.calc_samps(port_slice, start_pos, end_pos)?;
             }
-        } else {
+        }
+
+        // (b) Case of generic (not constant-only) functions
+        //  No line->port merging was done during compiling.
+        //  Need to first calculate sample vectors for each line individually
+        //  and then merge them into port values sample-by-sample
+        else {
             let (line_samp_buf, port_samp_buf) = match samp_bufs {
                 SampBufs::DOLinesPorts((lines, ports)) => (lines, ports),
                 _ => return Err("DODev::calc_samps_() received incorrect `SampBufs` variant".to_string()),
             };
 
-            // (1) Calculate samples for each line
-            self.calc_samps(&mut line_samp_buf[..], start_pos, end_pos)?;
+            // (1) Calculate samples for each line using `calc_samps()` from the `BaseDev` trait
+            BaseDev::calc_samps(self, &mut line_samp_buf[..], start_pos, end_pos)?;
 
-            // (2) Merge lines into ports
+            // (2) Merge lines into ports sample-by-sample
             port_samp_buf.fill(0);  // clear previous values in the buffer
 
-            for (port_row_idx, &port_num) in self.compiled_port_nums().iter().enumerate() {
+            for (port_row_idx, &port_num) in self.running_port_nums().iter().enumerate() {
                 let port_slice = &mut port_samp_buf[port_row_idx * samp_num .. (port_row_idx + 1) * samp_num];
 
                 for (chan_row_idx, chan) in self.compiled_chans().iter().enumerate() {
@@ -694,76 +724,35 @@ impl StreamDev<bool, DOChan> for DODev {
                         continue
                     }
                     let chan_slice = &line_samp_buf[chan_row_idx * samp_num .. (chan_row_idx + 1) * samp_num];
-                    let line_idx = chan.line();
-                    for (res, &samp) in port_slice.iter_mut().zip(chan_slice.iter()) {
-                        *res |= (samp as u32) << line_idx;
+                    let line_num = chan.line();
+                    for (port_samp, &line_samp) in port_slice.iter_mut().zip(chan_slice.iter()) {
+                        *port_samp |= (line_samp as u32) << line_num;
                     }
                 }
             }
         }
+
         Ok(())
     }
 
     fn write_to_hardware(&self, bundle: &mut StreamBundle, bufs: &SampBufs, samp_num: usize) -> Result<usize, DAQmxError> {
-        /*// Sanity check - requested samp_num is not too large
-        if bundle.samp_buf.len() < self.compiled_chans().len() * samp_num {
-            return Err(DAQmxError::new(format!(
-                "[write_buf()] BUG:\n\
-                \tsamp_num * self.compiled_chans().len() = {} \n\
-                is greater than \n\
-                \tstream_bundle.samp_buf.len() = {}",
-                samp_num * self.compiled_chans().len(),
-                bundle.samp_buf.len()
-            )))
-        }*/
-        // ToDo: sanity checks
-
         let port_samp_buf = match bufs {
             SampBufs::DOPorts(buf) => buf,
             SampBufs::DOLinesPorts((_lines, ports)) => ports,
             _ => return Err(DAQmxError::new("DODev::write_to_card() received incorrect `SampBufs` variant".to_string()))
         };
 
-        /*// (1) Merge lines into ports
-        match bundle.port_samp_buf.as_mut() {
-            None => {
-                // This is the first-time write_buf() call during cfg_run() - allocate the new Vec
-                bundle.port_samp_buf = Some(vec![0; self.compiled_port_nums().len() * samp_num]);
-            },
-            Some(port_samp_buf) => {
-                // This is a subsequent call of write_buf() after cfg_run() was completed.
-
-                // Check that port_samp_buf is large enough (it should be unless there is some bug)
-                let buf_size_needed = self.compiled_port_nums().len() * samp_num;
-                if port_samp_buf.len() < buf_size_needed {
-                    return Err(DAQmxError::new(format!(
-                        "[write_buf()] BUG: port_samp_buf has insufficient size:\n\
-                        \tport_samp_buf.len() = {}\n\
-                        \tself.compiled_port_nums().len() * samp_num = {buf_size_needed}",
-                        self.compiled_port_nums().len()
-                    )))
-                }
-
-                // Clear previous values
-                port_samp_buf.fill(0);
-            }
+        // Sanity check - requested `samp_num` is not too large
+        if port_samp_buf.len() < self.running_port_nums().len() * samp_num {
+            return Err(DAQmxError::new(format!(
+                "[write_to_hardware()] BUG:\n\
+                \tsamp_num * self.running_port_nums().len() = {} \n\
+                is greater than the total number of samples available in the buffer\n\
+                \tsamp_buf.len() = {}",
+                samp_num * self.running_port_nums().len(),
+                port_samp_buf.len()
+            )))
         }
-        let port_samp_buf = bundle.port_samp_buf.as_mut().unwrap();
-
-        for (port_row_idx, &port_num) in self.compiled_port_nums().iter().enumerate() {
-            let port_slice = &mut port_samp_buf[port_row_idx * samp_num .. (port_row_idx + 1) * samp_num];
-
-            for (chan_row_idx, chan) in self.compiled_chans().iter().enumerate() {
-                if chan.port() != port_num {
-                    continue
-                }
-                let chan_slice = &bundle.samp_buf[chan_row_idx * samp_num .. (chan_row_idx + 1) * samp_num];
-                let line_idx = chan.line();
-                for (res, &samp) in port_slice.iter_mut().zip(chan_slice.iter()) {
-                    *res |= (samp as u32) << line_idx;
-                }
-            }
-        }*/
 
         // Write to buffer
         let samps_written = bundle.ni_task.write_digital_port(
