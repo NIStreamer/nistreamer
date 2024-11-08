@@ -641,8 +641,8 @@ impl BaseDev<bool, DOChan> for DODev {
             // Create the port instance and store obtained compile cache
             let compiled_port = DOPort{
                 idx: port_num,
-                instr_ends: port_instr_ends,
-                instr_vals: port_instr_vals
+                ends: port_instr_ends,
+                vals: port_instr_vals
             };
             self.compiled_ports.as_mut().unwrap().insert(port_num, compiled_port);
         }

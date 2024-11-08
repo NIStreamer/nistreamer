@@ -175,12 +175,55 @@ impl BaseChan<bool> for DOChan {
 
 pub struct DOPort {
     pub idx: usize,
-    pub instr_ends: Vec<usize>,
-    pub instr_vals: Vec<u32>,
+    pub ends: Vec<usize>,
+    pub vals: Vec<u32>,
 }
+
+// region DO Port channel
 impl DOPort {
-    pub fn calc_samps(&self, samp_buf: &mut [u32], start_pos: usize, end_pos: usize) -> Result<(), String> {
-        todo!()
+    pub fn total_samps(&self) -> usize {
+        match self.ends.last() {
+            Some(&instr_end) => instr_end,
+            None => 0,
+        }
     }
 }
+
+impl DOPort {
+    pub fn calc_samps(&self, window_start: usize, samp_buf: &mut [u32]) -> Result<(), String> {
+        // Sanity check:
+        let window_end = window_start + samp_buf.len();
+        if !(window_end <= self.total_samps()) {
+            return Err(format!("DOPort::calc_samps() sampling window end {window_end} goes beyond the total compiled sample number {}", self.total_samps()))
+        }
+
+        // Find all instructions covered (fully or partially) by this window
+        let first_instr_idx = match self.ends.binary_search(&window_start) {
+            Ok(idx) => idx + 1,
+            Err(idx) => idx,
+        };
+        let last_instr_idx = match self.ends.binary_search(&window_end) {
+            Ok(idx) => idx,
+            Err(idx) => idx,
+        };
+
+        // Helper to map "absolute" clock grid position onto the index within sampling window
+        let rm_offs = |pos| -> usize {pos - window_start};
+
+        let mut cur_pos = window_start;
+        for idx in first_instr_idx..=last_instr_idx {
+            let &instr_end = self.ends.get(idx).unwrap();
+            let &instr_val = self.vals.get(idx).unwrap();
+
+            let next_pos = std::cmp::min(instr_end, window_end);
+
+            let buf_slice = &mut samp_buf[rm_offs(cur_pos)..rm_offs(next_pos)];
+            buf_slice.fill(instr_val);
+
+            cur_pos = next_pos;
+        }
+       Ok(())
+    }
+}
+// endregion
 // endregion
