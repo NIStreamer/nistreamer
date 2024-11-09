@@ -226,6 +226,10 @@ class DOChanProxy(BaseChanProxy):
             line=self.line
         )
 
+    @property
+    def const_fns_only(self):
+        return self._streamer.dodev_get_const_fns_only(name=self._card_max_name)
+
     def calc_signal(self, start_time=None, end_time=None, nsamps=1000):
         return self._streamer.do_chan_calc_nsamps(
             dev_name=self._card_max_name,
@@ -236,7 +240,7 @@ class DOChanProxy(BaseChanProxy):
             end_time=end_time
         )
 
-    def _add_instr(self, func, t, dur_spec):
+    def _unchecked_add_instr(self, func, t, dur_spec):
         self._streamer.do_chan_add_instr(
             dev_name=self._card_max_name,
             port=self.port,
@@ -246,32 +250,46 @@ class DOChanProxy(BaseChanProxy):
             dur_spec=dur_spec
         )
 
+    def _add_instr(self, func, t, dur_spec):
+        if self.const_fns_only:
+            raise ValueError(
+                "Constant-functions-only mode is currently enabled for this device\n"
+                "* If you wanted to add a simple high/low/go_high/go_low instruction, "
+                "use the corresponding named method\n"
+                "* If you actually wanted to add a generic non-constant function, "
+                "you have to set `your_do_card.const_fns_only = False` to disable this mode\n"
+                "See docs for details about const-fns-only mode and performance considerations"
+            )
+        self._unchecked_add_instr(func=func, t=t, dur_spec=dur_spec)
+
     # region Convenience methods to access the most common StdFnLib functions
     def go_high(self, t):
-        self.add_gothis_instr(
+        self._unchecked_add_instr(
             func=self._std_fn_lib.ConstBool(val=True),
-            t=t
+            t=t,
+            dur_spec=None
         )
 
     def go_low(self, t):
-        self.add_gothis_instr(
+        self._unchecked_add_instr(
             func=self._std_fn_lib.ConstBool(val=False),
-            t=t
+            t=t,
+            dur_spec=None
         )
 
     def high(self, t, dur):
-        return self.add_instr(
+        self._unchecked_add_instr(
             func=self._std_fn_lib.ConstBool(val=True),
             t=t,
-            dur=dur,
-            keep_val=False
+            dur_spec=(dur, False)
         )
+        return dur
 
     def low(self, t, dur):
-        return self.add_instr(
+        self._unchecked_add_instr(
             func=self._std_fn_lib.ConstBool(val=False),
             t=t,
-            dur=dur,
-            keep_val=False
+            dur_spec=(dur, False)
         )
+        return dur
     # endregion

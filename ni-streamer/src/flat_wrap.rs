@@ -280,6 +280,23 @@ impl StreamerWrap {
         ni_dev.hw_cfg_mut().min_bufwrite_timeout = min_timeout;
         Ok(())
     }
+
+    pub fn dodev_get_const_fns_only(&self, name: &str) -> PyResult<bool> {
+        let typed_dev = self.get_dev(name)?;
+        match typed_dev {
+            NIDev::DO(dev) => Ok(dev.get_const_fns_only()),
+            NIDev::AO(_) => Err(PyKeyError::new_err(format!("{name} is an AO card and does not support constant-function-only mode - this mode is for DO cards only"))),
+        }
+    }
+
+    pub fn dodev_set_const_fns_only(&mut self, name: &str, val: bool) -> PyResult<()> {
+        let typed_dev = self.get_dev_mut(name)?;
+        match typed_dev {
+            NIDev::DO(dev) => dev.set_const_fns_only(val),
+            NIDev::AO(_) => return Err(PyKeyError::new_err(format!("{name} is an AO card and does not support constant-function-only mode - this mode is for DO cards only"))),
+        };
+        Ok(())
+    }
     // endregion
 }
 // endregion

@@ -151,7 +151,7 @@ class AOCardProxy(BaseCardProxy):
 class DOCardProxy(BaseCardProxy):
 
     def __repr__(self):
-        return 'DO card ' + super().__repr__()
+        return 'DO card ' + super().__repr__() + f'\n\n\tConst fns only: {self.const_fns_only}'
 
     def add_chan(
             self,
@@ -180,3 +180,11 @@ class DOCardProxy(BaseCardProxy):
         )
         self._chans[chan_proxy.chan_name] = chan_proxy
         return chan_proxy
+
+    @property
+    def const_fns_only(self):
+        return self._streamer.dodev_get_const_fns_only(name=self.max_name)
+
+    @const_fns_only.setter
+    def const_fns_only(self, val):
+        self._streamer.dodev_set_const_fns_only(name=self.max_name, val=val)

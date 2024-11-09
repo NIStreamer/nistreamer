@@ -514,7 +514,7 @@ impl DODev {
             samp_rate,
             chans: IndexMap::new(),
             hw_cfg: HwCfg::dflt(),
-            const_fns_only: false,
+            const_fns_only: true,
             compiled_ports: None,
         }
     }
@@ -534,6 +534,18 @@ impl DODev {
             }
         );
         Ok(())
+    }
+
+    pub fn get_const_fns_only(&self) -> bool {
+        self.const_fns_only
+    }
+
+    pub fn set_const_fns_only(&mut self, val: bool) {
+        if self.const_fns_only != val {
+            self.clear_edit_cache();
+            self.clear_compile_cache();
+        }
+        self.const_fns_only = val;
     }
 
     /// Note: there are _running_ ports no matter if `const_fns_only` mode is used or not.
