@@ -190,7 +190,7 @@ impl DOPort {
 }
 
 impl DOPort {
-    pub fn calc_samps(&self, window_start: usize, samp_buf: &mut [u32]) -> Result<(), String> {
+    pub fn fill_samps(&self, window_start: usize, samp_buf: &mut [u32]) -> Result<(), String> {
         // Sanity check:
         let window_end = window_start + samp_buf.len();
         if !(window_end <= self.total_samps()) {
