@@ -738,7 +738,7 @@ impl StreamDev<bool, DOChan> for DODev {
         //  Line->port merging should have already been done during compilation.
         //  Now only need to calculate samples using already-compiled port channels
         if self.const_fns_only {
-            // Extract the buffer
+            // (1) Extract the buffer
             let port_samp_buf = match samp_bufs {
                 SampBufs::DOPorts(buf) => {
                     // Sanity check - the buffer is large enough
@@ -751,6 +751,7 @@ impl StreamDev<bool, DOChan> for DODev {
                 other => return Err(format!("DODev::calc_samps_()::const_fns_only received incorrect `SampBufs` variant {other:?}")),
             };
 
+            // (2) Calculate samples for each port
             for (port_row_idx, port) in self.compiled_ports.as_ref().unwrap().values().enumerate() {
                 let port_slice = &mut port_samp_buf[port_row_idx * samp_num .. (port_row_idx + 1) * samp_num];
                 port.fill_samps(start_pos, port_slice)?;
@@ -762,7 +763,7 @@ impl StreamDev<bool, DOChan> for DODev {
         //  Need to first calculate sample vectors for each line individually
         //  and then merge them into port values sample-by-sample
         else {
-            // Extract the buffers
+            // (1) Extract the buffers
             let (lines_buf, ports_buf) = match samp_bufs {
                 SampBufs::DOLinesPorts((lines_buf, ports_buf)) => {
                     // Sanity checks - the buffers are large enough
@@ -779,10 +780,10 @@ impl StreamDev<bool, DOChan> for DODev {
                 other => return Err(format!("DODev::calc_samps_() received incorrect `SampBufs` variant {other:?}")),
             };
 
-            // (1) Calculate samples for each line using `calc_samps()` from the `BaseDev` trait
+            // (2) Calculate samples for each line using `calc_samps()` from the `BaseDev` trait
             BaseDev::calc_samps(self, &mut lines_buf[..], start_pos, end_pos)?;
 
-            // (2) Merge lines into ports sample-by-sample
+            // (3) Merge lines into ports sample-by-sample
             ports_buf.fill(0);  // clear previous values in the buffer
 
             for (port_row_idx, &port_num) in self.running_port_nums().iter().enumerate() {
