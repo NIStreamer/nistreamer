@@ -58,7 +58,7 @@ use base_streamer::device::BaseDev;
 use base_streamer::streamer::BaseStreamer;
 
 use crate::channel::{AOChan, DOChan};
-use crate::device::{AODev, DODev, NIDev, StreamDev, StartSync, WorkerError};
+use crate::device::{AODev, DODev, NIDev, StreamControl, StartSync, WorkerError};
 use crate::nidaqmx;
 use crate::nidaqmx::DAQmxError;
 use crate::worker_cmd_chan::{CmdChan, CmdRecvr, WorkerCmd};

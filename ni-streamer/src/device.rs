@@ -135,11 +135,10 @@ pub trait CommonHwCfg {
 
 /// The `StreamableDevice` trait extends the [`nicompiler_backend::BaseDevice`] trait of [`nicompiler_backend::Device`]
 /// to provide additional functionality for streaming tasks.
-pub trait StreamDev<T, C>: BaseDev<T, C> + CommonHwCfg + Sync + Send
-where
-    T: Clone + Debug + Send + Sync + 'static,  // output sample data type
-    C: BaseChan<T>  // channel type
-{
+pub trait StreamControl: CommonHwCfg {
+    fn max_name(&self) -> String;
+    fn samp_rate(&self) -> f64;
+    fn total_samp_num(&self) -> usize;
     /// Helper function that configures the task channels for the device.
     ///
     /// This method is a helper utility designed to configure the task channels based on the device's `task_type`.
@@ -159,14 +158,10 @@ where
     /// `create_do_chan` method for each channel.
     ///
     /// The channel names are constructed using the format `/{device_name}/{channel_name}`.
-    // fn total_samp_num(&self) -> usize;
-
     fn create_task_chans(&self, task: &NiTask) -> Result<(), DAQmxError>;
     fn alloc_samp_bufs(&self, buf_size: usize) -> SampBufs;
-    fn calc_samps_(&self, samp_bufs: &mut SampBufs, start_pos: usize, end_pos: usize) -> Result<(), String>;
+    fn calc_samps(&self, samp_bufs: &mut SampBufs, start_pos: usize, end_pos: usize) -> Result<(), String>;
     fn write_to_hardware(&self, bundle: &mut StreamBundle, bufs: &SampBufs, samp_num: usize) -> Result<usize, DAQmxError>;
-    //      to remove dependency on `trait BaseDev<T>` and remove type parameter `T`:
-    // fn total_samps(self) -> usize;
 
     /// Streams an instruction signal to the specified NI-DAQ device.
     ///
@@ -238,7 +233,7 @@ where
             None => None,
         };
 
-        let seq_len = self.total_samps();
+        let seq_len = self.total_samp_num();
         let buf_size = std::cmp::min(
             seq_len,
             (buf_dur * self.samp_rate()).round() as usize,
@@ -262,7 +257,7 @@ where
 
         // Calc and write the initial sample chunk into the buffer
         let (start_pos, end_pos) = stream_bundle.counter.tick_next().unwrap();
-        self.calc_samps_(&mut samp_buf, start_pos, end_pos)?;
+        self.calc_samps(&mut samp_buf, start_pos, end_pos)?;
         self.write_to_hardware(&mut stream_bundle, &samp_buf, end_pos - start_pos)?;
 
         Ok((stream_bundle, samp_buf))
@@ -291,7 +286,7 @@ where
 
         // Main streaming loop
         while let Some((start_pos, end_pos)) = stream_bundle.counter.tick_next() {
-            self.calc_samps_(samp_bufs, start_pos, end_pos)?;
+            self.calc_samps(samp_bufs, start_pos, end_pos)?;
             self.write_to_hardware(stream_bundle, samp_bufs, end_pos - start_pos)?;
         }
 
@@ -303,7 +298,7 @@ where
         } else {
             stream_bundle.counter.reset();
             let (start_pos, end_pos) = stream_bundle.counter.tick_next().unwrap();
-            self.calc_samps_(samp_bufs, start_pos, end_pos)?;
+            self.calc_samps(samp_bufs, start_pos, end_pos)?;
 
             stream_bundle.ni_task.wait_until_done(stream_bundle.buf_write_timeout.clone())?;
             stream_bundle.ni_task.stop()?;
@@ -344,18 +339,18 @@ where
         if let Some(term) = &self.hw_cfg().samp_clk_out {
             task.export_signal(
                 DAQMX_VAL_SAMPLECLOCK,
-                &format!("/{}/{}", self.name(), term)
+                &format!("/{}/{}", self.max_name(), term)
             )?
         };
 
         // (2) Start trigger:
         if let Some(term) = &self.hw_cfg().start_trig_in {
-            task.cfg_dig_edge_start_trigger(&format!("/{}/{}", self.name(), term))?
+            task.cfg_dig_edge_start_trigger(&format!("/{}/{}", self.max_name(), term))?
         };
         if let Some(term) = &self.hw_cfg().start_trig_out {
             task.export_signal(
                 DAQMX_VAL_STARTTRIGGER,
-                &format!("/{}/{}", self.name(), term)
+                &format!("/{}/{}", self.max_name(), term)
             )?
         };
 
@@ -382,7 +377,7 @@ where
         but only expose it through the "advanced" function `nidaqmx::connect_terms()`.
         */
         if let Some(term) = &self.hw_cfg().ref_clk_in {
-            task.set_ref_clk_src(&format!("/{}/{}", self.name(), term))?;
+            task.set_ref_clk_src(&format!("/{}/{}", self.max_name(), term))?;
             task.set_ref_clk_rate(10.0e6)?;
         };
 
@@ -447,10 +442,22 @@ impl CommonHwCfg for AODev {
     }
 }
 
-impl StreamDev<f64, AOChan> for AODev {
+impl StreamControl for AODev {
+    fn max_name(&self) -> String {
+        self.name.clone()
+    }
+
+    fn samp_rate(&self) -> f64 {
+        self.samp_rate
+    }
+
+    fn total_samp_num(&self) -> usize {
+        self.total_samps()
+    }
+
     fn create_task_chans(&self, task: &NiTask) -> Result<(), DAQmxError> {
         for chan in self.compiled_chans().iter() {
-            task.create_ao_chan(&format!("/{}/{}", self.name(), chan.name()))?;
+            task.create_ao_chan(&format!("/{}/{}", self.max_name(), chan.name()))?;
         };
         Ok(())
     }
@@ -461,7 +468,7 @@ impl StreamDev<f64, AOChan> for AODev {
         )
     }
 
-    fn calc_samps_(&self, samp_bufs: &mut SampBufs, start_pos: usize, end_pos: usize) -> Result<(), String> {
+    fn calc_samps(&self, samp_bufs: &mut SampBufs, start_pos: usize, end_pos: usize) -> Result<(), String> {
         let samp_buf = match samp_bufs {
             SampBufs::AO(samp_buf) => samp_buf,
             other => return Err(format!("AODev::calc_samps_() received incorrect `SampBufs` variant {other:?}")),
@@ -701,10 +708,22 @@ impl CommonHwCfg for DODev {
     }
 }
 
-impl StreamDev<bool, DOChan> for DODev {
+impl StreamControl for DODev {
+    fn max_name(&self) -> String {
+        self.name.clone()
+    }
+
+    fn samp_rate(&self) -> f64 {
+        self.samp_rate
+    }
+
+    fn total_samp_num(&self) -> usize {
+        self.total_samps()
+    }
+
     fn create_task_chans(&self, task: &NiTask) -> Result<(), DAQmxError> {
         for port_num in self.running_port_nums() {
-            task.create_do_chan(&format!("/{}/port{}", self.name(), port_num))?;
+            task.create_do_chan(&format!("/{}/port{}", self.max_name(), port_num))?;
         }
         Ok(())
     }
@@ -722,7 +741,7 @@ impl StreamDev<bool, DOChan> for DODev {
         }
     }
 
-    fn calc_samps_(&self, samp_bufs: &mut SampBufs, start_pos: usize, end_pos: usize) -> Result<(), String> {
+    fn calc_samps(&self, samp_bufs: &mut SampBufs, start_pos: usize, end_pos: usize) -> Result<(), String> {
         if !(end_pos >= start_pos + 1) {
             return Err(format!(
                 "StreamDev::calc_samps_() - requested start_pos={start_pos} and end_pos={end_pos} are invalid.\n\
