@@ -135,10 +135,10 @@ pub trait CommonHwCfg {
 
 /// The `StreamableDevice` trait extends the [`nicompiler_backend::BaseDevice`] trait of [`nicompiler_backend::Device`]
 /// to provide additional functionality for streaming tasks.
-pub trait StreamControl: CommonHwCfg {
+pub trait RunControl: CommonHwCfg {
     fn max_name(&self) -> String;
     fn samp_rate(&self) -> f64;
-    fn total_samp_num(&self) -> usize;
+    fn total_samps(&self) -> usize;
     /// Helper function that configures the task channels for the device.
     ///
     /// This method is a helper utility designed to configure the task channels based on the device's `task_type`.
@@ -233,7 +233,7 @@ pub trait StreamControl: CommonHwCfg {
             None => None,
         };
 
-        let seq_len = self.total_samp_num();
+        let seq_len = self.total_samps();
         let buf_size = std::cmp::min(
             seq_len,
             (buf_dur * self.samp_rate()).round() as usize,
@@ -442,7 +442,7 @@ impl CommonHwCfg for AODev {
     }
 }
 
-impl StreamControl for AODev {
+impl RunControl for AODev {
     fn max_name(&self) -> String {
         self.name.clone()
     }
@@ -451,8 +451,8 @@ impl StreamControl for AODev {
         self.samp_rate
     }
 
-    fn total_samp_num(&self) -> usize {
-        self.total_samps()
+    fn total_samps(&self) -> usize {
+        self.compiled_stop_pos()
     }
 
     fn create_task_chans(&self, task: &NiTask) -> Result<(), DAQmxError> {
@@ -471,7 +471,7 @@ impl StreamControl for AODev {
     fn calc_samps(&self, samp_bufs: &mut SampBufs, start_pos: usize, end_pos: usize) -> Result<(), String> {
         let samp_buf = match samp_bufs {
             SampBufs::AO(samp_buf) => samp_buf,
-            other => return Err(format!("AODev::calc_samps_() received incorrect `SampBufs` variant {other:?}")),
+            other => return Err(format!("AODev::calc_samps() received incorrect `SampBufs` variant {other:?}")),
         };
         BaseDev::calc_samps(self, &mut samp_buf[..], start_pos, end_pos)
     }
@@ -708,7 +708,7 @@ impl CommonHwCfg for DODev {
     }
 }
 
-impl StreamControl for DODev {
+impl RunControl for DODev {
     fn max_name(&self) -> String {
         self.name.clone()
     }
@@ -717,8 +717,8 @@ impl StreamControl for DODev {
         self.samp_rate
     }
 
-    fn total_samp_num(&self) -> usize {
-        self.total_samps()
+    fn total_samps(&self) -> usize {
+        self.compiled_stop_pos()
     }
 
     fn create_task_chans(&self, task: &NiTask) -> Result<(), DAQmxError> {
@@ -744,12 +744,12 @@ impl StreamControl for DODev {
     fn calc_samps(&self, samp_bufs: &mut SampBufs, start_pos: usize, end_pos: usize) -> Result<(), String> {
         if !(end_pos >= start_pos + 1) {
             return Err(format!(
-                "StreamDev::calc_samps_() - requested start_pos={start_pos} and end_pos={end_pos} are invalid.\n\
+                "StreamDev::calc_samps() - requested start_pos={start_pos} and end_pos={end_pos} are invalid.\n\
                 end_pos must be no less than start_pos + 1"
             ))
         }
-        if end_pos > self.total_samps() {
-            return Err(format!("StreamDev::calc_samps_() - requested end_pos={end_pos} exceeds total compiled sample number {}", self.total_samps()))
+        if end_pos > self.compiled_stop_pos() {
+            return Err(format!("StreamDev::calc_samps() - requested end_pos={end_pos} exceeds total compiled sample number {}", self.compiled_stop_pos()))
         }
         let samp_num = end_pos - start_pos;
 
