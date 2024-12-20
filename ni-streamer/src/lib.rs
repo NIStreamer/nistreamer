@@ -132,6 +132,9 @@ pub mod utils;
 pub mod worker_cmd_chan;
 pub mod flat_wrap;
 
+// pub mod nidaqmx_dummy;
+// use nidaqmx_dummy as nidaqmx;
+
 use pyo3::prelude::*;
 use pyo3::exceptions::{PyValueError};
 
