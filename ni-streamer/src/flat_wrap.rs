@@ -70,16 +70,16 @@ impl StreamerWrap {
     // endregion
 
     // region Compile
-    fn last_instr_end_time(&self) -> f64 {
+    fn last_instr_end_time(&self) -> Option<f64> {
         self.inner.last_instr_end_time()
     }
 
-    fn total_run_time(&self) -> f64 {
+    fn total_run_time(&self) -> Option<f64> {
         self.inner.total_run_time()
     }
 
     #[pyo3(signature = (stop_time=None))]
-    fn compile(&mut self, stop_time: Option<f64>) -> PyResult<f64> {
+    fn compile(&mut self, stop_time: Option<f64>) -> PyResult<Option<f64>> {
         match self.inner.compile(stop_time) {
             Ok(total_run_time) => Ok(total_run_time),
             Err(msg) => Err(PyValueError::new_err(msg)),
@@ -182,7 +182,7 @@ impl StreamerWrap {
         }
     }
 
-    pub fn dev_last_instr_end_time(&self, name: &str) -> PyResult<f64> {
+    pub fn dev_last_instr_end_time(&self, name: &str) -> PyResult<Option<f64>> {
         let typed_dev = self.get_dev(name)?;
         Ok(match typed_dev {
             NIDev::AO(dev) => dev.last_instr_end_time(),
@@ -416,7 +416,7 @@ impl StreamerWrap {
         Ok(chan.rst_val())
     }
 
-    pub fn chan_last_instr_end_time(&self, dev_name: &str, chan_name: &str) -> PyResult<f64> {
+    pub fn chan_last_instr_end_time(&self, dev_name: &str, chan_name: &str) -> PyResult<Option<f64>> {
         let dev = self.get_dev(dev_name)?;
         Ok(match dev {
             NIDev::AO(dev) => {

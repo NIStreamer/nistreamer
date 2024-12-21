@@ -173,7 +173,10 @@ class NIStreamer:
     def ref_clk_provider(self, dev_and_term: Union[Tuple[str, str], None]):
         self._streamer.set_ref_clk_provider(provider=dev_and_term)
 
-    def compile(self, stop_time: Optional[float] = None) -> float:
+    def last_instr_end_time(self) -> Union[float, None]:
+        return self._streamer.last_instr_end_time()
+
+    def compile(self, stop_time: Optional[float] = None) -> Union[float, None]:
         return self._streamer.compile(stop_time=stop_time)
 
     def run(self, nreps: Optional[int] = 1, bufsize_ms: Optional[float] = 150) -> None:

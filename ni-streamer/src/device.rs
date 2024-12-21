@@ -453,7 +453,7 @@ impl RunControl for AODev {
     }
 
     fn total_samps(&self) -> usize {
-        self.compiled_stop_pos()
+        self.compiled_stop_pos().unwrap()
     }
 
     fn create_task_chans(&self, task: &NiTask) -> Result<(), DAQmxError> {
@@ -612,13 +612,13 @@ impl BaseDev<bool, DOChan> for DODev {
         self.compiled_ports = None;
     }
 
-    fn compile(&mut self, stop_time: f64) -> Result<f64, String> {
+    fn compile(&mut self, stop_time: f64) -> Result<Option<f64>, String> {
         self.clear_compile_cache();
 
-        let total_run_time = BaseDev::compile_base(self, stop_time)?;
+        let compiled_stop_time = BaseDev::compile_base(self, stop_time)?;
         if !self.const_fns_only {
             // Generic instruction case - cannot do line->port merging at compile time. Will have to merge samples on-the-fly during streaming.
-            return Ok(total_run_time)
+            return Ok(compiled_stop_time)
         }
 
         // Line -> port merging
@@ -695,7 +695,7 @@ impl BaseDev<bool, DOChan> for DODev {
         // Finally, store all the compiled `DOPort`s in `DODev` compile cache field
         self.compiled_ports = Some(compiled_ports);
 
-        Ok(total_run_time)
+        Ok(compiled_stop_time)
     }
 }
 
@@ -719,7 +719,7 @@ impl RunControl for DODev {
     }
 
     fn total_samps(&self) -> usize {
-        self.compiled_stop_pos()
+        self.compiled_stop_pos().unwrap()
     }
 
     fn create_task_chans(&self, task: &NiTask) -> Result<(), DAQmxError> {
@@ -743,14 +743,27 @@ impl RunControl for DODev {
     }
 
     fn calc_samps(&self, samp_bufs: &mut SampBufs, start_pos: usize, end_pos: usize) -> Result<(), String> {
+        // Sanity checks
+        //  Do not launch panics in this function since it is used during streaming runtime. Return `Result::Err` instead.
+        /*      During streaming, there is an active connection to the hardware driver.
+                In case of panic, context is being dropped in unspecified order.
+                The connection drop logic may be invoked only after some parts of memory have already been deallocated
+                and thus fail to free-up hardware properly leading to unpredictable consequences like OS freezes.
+        */
+        if !self.got_instructions() {
+            return Err(format!("calc_samps(): device {} did not get any instructions", self.name()))
+        }
+        if !self.is_fresh_compiled() {
+            return Err(format!("calc_samps(): device {} is not fresh-compiled", self.name()))
+        }
         if !(end_pos >= start_pos + 1) {
             return Err(format!(
                 "StreamDev::calc_samps() - requested start_pos={start_pos} and end_pos={end_pos} are invalid.\n\
                 end_pos must be no less than start_pos + 1"
             ))
         }
-        if end_pos > self.compiled_stop_pos() {
-            return Err(format!("StreamDev::calc_samps() - requested end_pos={end_pos} exceeds total compiled sample number {}", self.compiled_stop_pos()))
+        if end_pos > self.compiled_stop_pos().unwrap() {
+            return Err(format!("StreamDev::calc_samps() - requested end_pos={end_pos} exceeds total compiled sample number {}", self.compiled_stop_pos().unwrap()))
         }
         let samp_num = end_pos - start_pos;
 
