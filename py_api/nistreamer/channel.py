@@ -82,6 +82,12 @@ class BaseChanProxy(ABC):
         # so each subclass has to re-implement this method
         pass
 
+    @abstractmethod
+    def eval_point(self, t):
+        # AO and DO cards have different sample types and thus call different Rust functions,
+        # so each subclass has to re-implement this method
+        pass
+
 
 class AOChanProxy(BaseChanProxy):
     def __init__(
@@ -130,6 +136,13 @@ class AOChanProxy(BaseChanProxy):
             n_samps=nsamps,
             start_time=start_time,
             end_time=end_time
+        )
+
+    def eval_point(self, t):
+        return self._streamer.ao_chan_eval_point(
+            dev_name=self._card_max_name,
+            chan_idx=self.chan_idx,
+            t=t
         )
 
     def _add_instr(self, func, t, dur_spec):
@@ -238,6 +251,14 @@ class DOChanProxy(BaseChanProxy):
             n_samps=nsamps,
             start_time=start_time,
             end_time=end_time
+        )
+
+    def eval_point(self, t):
+        return self._streamer.do_chan_eval_point(
+            dev_name=self._card_max_name,
+            port=self.port,
+            line=self.line,
+            t=t
         )
 
     def _unchecked_add_instr(self, func, t, dur_spec):

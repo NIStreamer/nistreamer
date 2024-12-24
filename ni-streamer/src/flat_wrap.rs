@@ -508,5 +508,21 @@ impl StreamerWrap {
             Err(msg) => Err(PyValueError::new_err(msg))
         }
     }
+
+    pub fn ao_chan_eval_point(&self, dev_name: &str, chan_idx: usize, t: f64) -> PyResult<f64> {
+        let chan = self.get_ao_chan(dev_name, chan_idx)?;
+        match chan.eval_point(t) {
+            Ok(val) => Ok(val),
+            Err(msg) => Err(PyValueError::new_err(msg))
+        }
+    }
+
+    pub fn do_chan_eval_point(&self, dev_name: &str, port: usize, line: usize, t: f64) -> PyResult<bool> {
+        let chan = self.get_do_chan(dev_name, port, line)?;
+        match chan.eval_point(t) {
+            Ok(val) => Ok(val),
+            Err(msg) => Err(PyValueError::new_err(msg))
+        }
+    }
 }
 // endregion
