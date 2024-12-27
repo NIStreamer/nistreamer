@@ -10,10 +10,10 @@ pub struct AOChan {
     samp_rate: f64,
     dflt_val: f64,
     rst_val: f64,
-    is_fresh_compiled: bool,
     instr_list: BTreeSet<Instr<f64>>,
     compile_cache_ends: Vec<usize>,
-    compile_cache_fns: Vec<Box<dyn FnTraitSet<f64>>>
+    compile_cache_fns: Vec<Box<dyn FnTraitSet<f64>>>,
+    is_fresh_compiled: bool
 }
 
 impl AOChan {
@@ -23,10 +23,10 @@ impl AOChan {
             samp_rate,
             dflt_val,
             rst_val,
-            is_fresh_compiled: true,
             instr_list: BTreeSet::new(),
             compile_cache_ends: Vec::new(),
             compile_cache_fns: Vec::new(),
+            is_fresh_compiled: true,
         }
     }
 
@@ -42,10 +42,6 @@ impl BaseChan<f64> for AOChan {
 
     fn samp_rate(&self) -> f64 {
         self.samp_rate
-    }
-
-    fn is_fresh_compiled(&self) -> bool {
-        self.is_fresh_compiled
     }
 
     fn dflt_val(&self) -> f64 {
@@ -68,8 +64,8 @@ impl BaseChan<f64> for AOChan {
         &self.compile_cache_fns
     }
 
-    fn fresh_compiled_mut(&mut self) -> &mut bool {
-        &mut self.is_fresh_compiled
+    fn is_fresh_compiled(&self) -> bool {
+        self.is_fresh_compiled
     }
 
     fn instr_list_mut(&mut self) -> &mut BTreeSet<Instr<f64>> {
@@ -83,6 +79,10 @@ impl BaseChan<f64> for AOChan {
     fn compile_cache_fns_mut(&mut self) -> &mut Vec<Box<dyn FnTraitSet<f64>>> {
         &mut self.compile_cache_fns
     }
+
+    fn is_fresh_compiled_mut(&mut self) -> &mut bool {
+        &mut self.is_fresh_compiled
+    }
 }
 // endregion
 
@@ -93,10 +93,10 @@ pub struct DOChan {
     samp_rate: f64,
     dflt_val: bool,
     rst_val: bool,
-    is_fresh_compiled: bool,
     instr_list: BTreeSet<Instr<bool>>,
     compile_cache_ends: Vec<usize>,
-    compile_cache_fns: Vec<Box<dyn FnTraitSet<bool>>>
+    compile_cache_fns: Vec<Box<dyn FnTraitSet<bool>>>,
+    is_fresh_compiled: bool,
 }
 
 impl DOChan {
@@ -107,10 +107,10 @@ impl DOChan {
             samp_rate,
             dflt_val,
             rst_val,
-            is_fresh_compiled: false,
             instr_list: BTreeSet::new(),
             compile_cache_ends: Vec::new(),
             compile_cache_fns: Vec::new(),
+            is_fresh_compiled: true,
         }
     }
 
@@ -130,10 +130,6 @@ impl BaseChan<bool> for DOChan {
 
     fn samp_rate(&self) -> f64 {
         self.samp_rate
-    }
-
-    fn is_fresh_compiled(&self) -> bool {
-        self.is_fresh_compiled
     }
 
     fn dflt_val(&self) -> bool {
@@ -156,8 +152,8 @@ impl BaseChan<bool> for DOChan {
         &self.compile_cache_fns
     }
 
-    fn fresh_compiled_mut(&mut self) -> &mut bool {
-        &mut self.is_fresh_compiled
+    fn is_fresh_compiled(&self) -> bool {
+        self.is_fresh_compiled
     }
 
     fn instr_list_mut(&mut self) -> &mut BTreeSet<Instr<bool>> {
@@ -170,6 +166,10 @@ impl BaseChan<bool> for DOChan {
 
     fn compile_cache_fns_mut(&mut self) -> &mut Vec<Box<dyn FnTraitSet<bool>>> {
         &mut self.compile_cache_fns
+    }
+
+    fn is_fresh_compiled_mut(&mut self) -> &mut bool {
+        &mut self.is_fresh_compiled
     }
 }
 
