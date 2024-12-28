@@ -453,11 +453,11 @@ impl RunControl for AODev {
     }
 
     fn total_samps(&self) -> usize {
-        self.compiled_stop_pos().unwrap()
+        self.compiled_stop_pos()
     }
 
     fn create_task_chans(&self, task: &NiTask) -> Result<(), DAQmxError> {
-        for chan in self.compiled_chans().iter() {
+        for chan in self.active_chans() {
             task.create_ao_chan(&format!("/{}/{}", self.max_name(), chan.name()))?;
         };
         Ok(())
@@ -465,7 +465,7 @@ impl RunControl for AODev {
 
     fn alloc_samp_bufs(&self, buf_size: usize) -> SampBufs {
         SampBufs::AO(
-            vec![0.0; buf_size * self.compiled_chans().len()]
+            vec![0.0; buf_size * self.active_chans().len()]
         )
     }
 
@@ -484,13 +484,13 @@ impl RunControl for AODev {
         };
 
         // Sanity check - requested `samp_num` is not too large
-        if self.compiled_chans().len() * samp_num > samp_buf.len() {
+        if self.active_chans().len() * samp_num > samp_buf.len() {
             return Err(DAQmxError::new(format!(
                 "[write_to_hardware()] BUG:\n\
-                \tsamp_num * self.compiled_chans().len() = {} \n\
+                \tsamp_num * self.active_chans().len() = {} \n\
                 exceeds the total number of samples available in the buffer\n\
                 \tsamp_buf.len() = {}",
-                self.compiled_chans().len() * samp_num,
+                self.active_chans().len() * samp_num,
                 samp_buf.len()
             )))
         }
@@ -556,7 +556,7 @@ impl DODev {
         self.const_fns_only = val;
     }
 
-    /// Note: there are _running_ ports no matter if `const_fns_only` mode is used or not.
+    /// Note: there are _active_ ports no matter if `const_fns_only` mode is used or not.
     /// This function returns the numbers of the ports which will be added to NI task.
     ///
     /// * If `const_fn_only = true`, line->port merging was done during `BaseDev::compile()`
@@ -564,9 +564,9 @@ impl DODev {
     ///
     /// * If `const_fn_only = false`, there are no "compiled" port instances after `BaseDev::compile()`
     ///   and line->port merging will have to be done sample-by-sample during `StreamDev::calc_samps_()`,
-    ///   BUT there are still running ports and this function returns their numbers.
-    pub fn running_port_nums(&self) -> Vec<usize> {
-        let running_port_nums_ = self.compiled_chans()
+    ///   BUT there are still active ports and this function returns their numbers.
+    pub fn active_port_nums(&self) -> Vec<usize> {
+        let active_port_nums_ = self.active_chans()
             .iter()
             .map(|chan| chan.port())
             .unique()
@@ -581,10 +581,10 @@ impl DODev {
                 .keys()
                 .map(|&num| num)
                 .collect();
-            assert_eq!(running_port_nums_, compiled_port_nums)
+            assert_eq!(active_port_nums_, compiled_port_nums)
         }
 
-        return running_port_nums_
+        return active_port_nums_
     }
 }
 
@@ -612,7 +612,7 @@ impl BaseDev<bool, DOChan> for DODev {
         self.compiled_ports = None;
     }
 
-    fn compile(&mut self, stop_time: f64) -> Result<Option<f64>, String> {
+    fn compile(&mut self, stop_time: f64) -> Result<f64, String> {
         self.clear_compile_cache();
 
         let compiled_stop_time = BaseDev::compile_base(self, stop_time)?;
@@ -627,7 +627,7 @@ impl BaseDev<bool, DOChan> for DODev {
 
         // (1) Group line channels by ports for convenience
         let mut port_map = IndexMap::new();
-        for chan in self.compiled_chans() {
+        for chan in self.active_chans() {
             let port_num = chan.port();
             let line_num = chan.line();
 
@@ -719,11 +719,11 @@ impl RunControl for DODev {
     }
 
     fn total_samps(&self) -> usize {
-        self.compiled_stop_pos().unwrap()
+        self.compiled_stop_pos()
     }
 
     fn create_task_chans(&self, task: &NiTask) -> Result<(), DAQmxError> {
-        for port_num in self.running_port_nums() {
+        for port_num in self.active_port_nums() {
             task.create_do_chan(&format!("/{}/port{}", self.max_name(), port_num))?;
         }
         Ok(())
@@ -732,12 +732,12 @@ impl RunControl for DODev {
     fn alloc_samp_bufs(&self, buf_size: usize) -> SampBufs {
         if self.const_fns_only {
             SampBufs::DOPorts(
-                vec![0_u32; buf_size * self.running_port_nums().len()]
+                vec![0_u32; buf_size * self.active_port_nums().len()]
             )
         } else {
             SampBufs::DOLinesPorts((
-                vec![false; buf_size * self.compiled_chans().len()],
-                vec![0_u32; buf_size * self.running_port_nums().len()]
+                vec![false; buf_size * self.active_chans().len()],
+                vec![0_u32; buf_size * self.active_port_nums().len()]
             ))
         }
     }
@@ -753,17 +753,15 @@ impl RunControl for DODev {
         if !self.got_instructions() {
             return Err(format!("calc_samps(): device {} did not get any instructions", self.name()))
         }
-        if !self.is_fresh_compiled() {
-            return Err(format!("calc_samps(): device {} is not fresh-compiled", self.name()))
-        }
+        self.validate_compile_cache()?;
         if !(end_pos >= start_pos + 1) {
             return Err(format!(
                 "StreamDev::calc_samps() - requested start_pos={start_pos} and end_pos={end_pos} are invalid.\n\
                 end_pos must be no less than start_pos + 1"
             ))
         }
-        if end_pos > self.compiled_stop_pos().unwrap() {
-            return Err(format!("StreamDev::calc_samps() - requested end_pos={end_pos} exceeds total compiled sample number {}", self.compiled_stop_pos().unwrap()))
+        if end_pos > self.compiled_stop_pos() {
+            return Err(format!("StreamDev::calc_samps() - requested end_pos={end_pos} exceeds total compiled sample number {}", self.compiled_stop_pos()))
         }
         let samp_num = end_pos - start_pos;
 
@@ -775,7 +773,7 @@ impl RunControl for DODev {
             let port_samp_buf = match samp_bufs {
                 SampBufs::DOPorts(buf) => {
                     // Sanity check - the buffer is large enough
-                    let port_samps_needed = self.running_port_nums().len() * samp_num;
+                    let port_samps_needed = self.active_port_nums().len() * samp_num;
                     if port_samps_needed > buf.len() {
                         return Err(format!("StreamDev::calc_samps_()::const_fns_only - ports sample number {port_samps_needed} exceeds buffer size {}", buf.len()))
                     };
@@ -800,11 +798,11 @@ impl RunControl for DODev {
             let (lines_buf, ports_buf) = match samp_bufs {
                 SampBufs::DOLinesPorts((lines_buf, ports_buf)) => {
                     // Sanity checks - the buffers are large enough
-                    let line_samps_needed = self.compiled_chans().len() * samp_num;
+                    let line_samps_needed = self.active_chans().len() * samp_num;
                     if line_samps_needed > lines_buf.len() {
                         return Err(format!("DODev::calc_samps_()::generic_fns - the lines sample number {line_samps_needed} exceeds line buffer size {}", lines_buf.len()))
                     }
-                    let port_samps_needed = self.running_port_nums().len() * samp_num;
+                    let port_samps_needed = self.active_port_nums().len() * samp_num;
                     if port_samps_needed > ports_buf.len() {
                         return Err(format!("DODev::calc_samps_()::generic_fns - the ports sample number {port_samps_needed} exceeds port buffer size {}", ports_buf.len()))
                     }
@@ -819,10 +817,10 @@ impl RunControl for DODev {
             // (3) Merge lines into ports sample-by-sample
             ports_buf.fill(0);  // clear previous values in the buffer
 
-            for (port_row_idx, &port_num) in self.running_port_nums().iter().enumerate() {
+            for (port_row_idx, &port_num) in self.active_port_nums().iter().enumerate() {
                 let port_slice = &mut ports_buf[port_row_idx * samp_num .. (port_row_idx + 1) * samp_num];
 
-                for (chan_row_idx, chan) in self.compiled_chans().iter().enumerate() {
+                for (chan_row_idx, chan) in self.active_chans().iter().enumerate() {
                     if chan.port() != port_num {
                         continue
                     }
@@ -846,13 +844,13 @@ impl RunControl for DODev {
         };
 
         // Sanity check - requested `samp_num` is not too large
-        if self.running_port_nums().len() * samp_num > ports_buf.len() {
+        if self.active_port_nums().len() * samp_num > ports_buf.len() {
             return Err(DAQmxError::new(format!(
                 "[write_to_hardware()] BUG:\n\
                 \tsamp_num * self.running_port_nums().len() = {} \n\
                 exceeds the total number of samples available in the buffer\n\
                 \tsamp_buf.len() = {}",
-                samp_num * self.running_port_nums().len(),
+                samp_num * self.active_port_nums().len(),
                 ports_buf.len()
             )))
         }
