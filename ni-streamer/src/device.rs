@@ -566,25 +566,12 @@ impl DODev {
     ///   and line->port merging will have to be done sample-by-sample during `StreamDev::calc_samps_()`,
     ///   BUT there are still active ports and this function returns their numbers.
     pub fn active_port_nums(&self) -> Vec<usize> {
-        let active_port_nums_ = self.active_chans()
+        self.active_chans()
             .iter()
             .map(|chan| chan.port())
             .unique()
             .sorted()
-            .collect();
-
-        // Consistency check if `const_fns_only` is used
-        if self.const_fns_only {
-            let compiled_port_nums: Vec<usize> = self.compiled_ports
-                .as_ref()
-                .unwrap()
-                .keys()
-                .map(|&num| num)
-                .collect();
-            assert_eq!(active_port_nums_, compiled_port_nums)
-        }
-
-        return active_port_nums_
+            .collect()
     }
 }
 
@@ -696,6 +683,47 @@ impl BaseDev<bool, DOChan> for DODev {
         self.compiled_ports = Some(compiled_ports);
 
         Ok(compiled_stop_time)
+    }
+
+    fn validate_compile_cache(&self) -> Result<(), String> {
+        // First, check all active line channels as `BaseDev` does
+        BaseDev::validate_compile_cache_base(self)?;
+
+        // Second, DODev in "constant-functions-only" mode should also have compiled port channels - check them as well
+        if self.const_fns_only {
+            // (1) For every active port, there should be a corresponding compiled port instance in the cache
+            if self.compiled_ports.is_none() {
+                return Err(format!("[BUG] DO Device {} is configured to use const_fns_only mode but there are no compiled ports in cache", self.name()))
+            }
+            let present_compiled_ports: Vec<usize> = self.compiled_ports.as_ref().unwrap()
+                .values()
+                .map(|port| port.idx.clone())
+                .sorted()
+                .collect();
+            let mut active_ports = self.active_port_nums();
+            active_ports.sort();
+            if present_compiled_ports != active_ports {
+                return Err(format!(
+                    "[BUG] DO Device {} is configured to use const_fns_only mode but present compiled ports don't match active ports:\n\
+                    present_compiled_ports: {present_compiled_ports:?}\n\
+                              active_ports: {active_ports:?}",
+                    self.name()
+                ))
+            }
+
+            // (2) All compiled ports should have the same stop_pos as line channels
+            let port_stop_positions: IndexMap<usize, usize> = self.compiled_ports.as_ref().unwrap()
+                .iter()
+                .map(|(&port_num, port)| (port_num, port.total_samps()))
+                .collect();
+            let line_stop_pos = self.active_chans().last().unwrap().compiled_stop_pos();  // the same across all lines, checked in `BaseDev::validate_compile_cache_base()`
+            let all_equal = port_stop_positions.values().all(|&stop_pos| stop_pos == line_stop_pos);
+            if !all_equal {
+                return Err(format!("[BUG] DO Device {}: port stop positions don't match line stop position {line_stop_pos}: \n{port_stop_positions:?}", self.name()))
+            }
+        }
+
+        Ok(())
     }
 }
 

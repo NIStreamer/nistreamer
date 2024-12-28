@@ -173,13 +173,13 @@ impl BaseChan<bool> for DOChan {
     }
 }
 
+// region DO Port channel
 pub struct DOPort {
     pub idx: usize,
     pub ends: Vec<usize>,
     pub vals: Vec<u32>,
 }
 
-// region DO Port channel
 impl DOPort {
     pub fn total_samps(&self) -> usize {
         match self.ends.last() {
@@ -187,9 +187,7 @@ impl DOPort {
             None => 0,
         }
     }
-}
 
-impl DOPort {
     pub fn fill_samps(&self, window_start: usize, samp_buf: &mut [u32]) -> Result<(), String> {
         // Sanity check:
         let window_end = window_start + samp_buf.len();
