@@ -138,6 +138,9 @@ pub mod flat_wrap;
 use pyo3::prelude::*;
 use pyo3::exceptions::{PyValueError};
 
+extern crate indexmap;
+extern crate itertools;
+
 use crate::flat_wrap::StreamerWrap;
 
 extern crate base_streamer;
