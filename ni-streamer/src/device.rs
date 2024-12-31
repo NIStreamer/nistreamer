@@ -593,9 +593,7 @@ impl BaseDev<bool, DOChan> for DODev {
     }
 
     fn clear_compile_cache(&mut self) {
-        for chan in self.chans_mut().values_mut() {
-            chan.clear_compile_cache()
-        }
+        BaseDev::clear_compile_cache_base(self);
         self.compiled_ports = None;
     }
 
