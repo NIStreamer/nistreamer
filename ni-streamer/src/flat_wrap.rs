@@ -93,7 +93,7 @@ impl StreamerWrap {
     fn validate_compile_cache(&self) -> PyResult<()> {
         match self.inner.validate_compile_cache() {
             Ok(()) => Ok(()),
-            Err(msg) => PyValueError::new_err(msg)
+            Err(msg) => Err(PyValueError::new_err(msg))
         }
     }
 
