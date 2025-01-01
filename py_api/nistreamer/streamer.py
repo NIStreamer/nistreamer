@@ -173,11 +173,23 @@ class NIStreamer:
     def ref_clk_provider(self, dev_and_term: Union[Tuple[str, str], None]):
         self._streamer.set_ref_clk_provider(provider=dev_and_term)
 
+    def got_instructions(self) -> bool:
+        return self._streamer.got_instructions()
+
     def last_instr_end_time(self) -> Union[float, None]:
         return self._streamer.last_instr_end_time()
 
-    def compile(self, stop_time: Optional[float] = None) -> Union[float, None]:
+    def compile(self, stop_time: Optional[float] = None) -> float:
         return self._streamer.compile(stop_time=stop_time)
+
+    def validate_compile_cache(self):
+        """Returns None if compile cache is valid (up-to-date with the current edit cache).
+        Raises ValueError if compile cache is invalid (typical reason - users forgot to re-compile
+        after adding more instructions).
+
+        :return: None if compile cache is valid (up-to-date with the current edit cache)
+        """
+        self._streamer.validate_compile_cache()
 
     def run(self, nreps: Optional[int] = 1, bufsize_ms: Optional[float] = 150) -> None:
         try:

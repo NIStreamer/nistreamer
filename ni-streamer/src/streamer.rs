@@ -227,18 +227,19 @@ impl Streamer {
     }
 
     pub fn cfg_run_(&mut self, bufsize_ms: f64) -> Result<(), String> {
-        let running_dev_names: Vec<String> = self.devs
+        if !self.got_instructions() {
+            return Err("Streamer did not get any instructions".to_string())
+        }
+        self.validate_compile_cache()?;
+
+        let active_dev_names: Vec<String> = self.devs
             .iter()
             .filter(|(_name, typed_dev)| match typed_dev {
-                NIDev::AO(dev) => dev.is_compiled(),
-                NIDev::DO(dev) => dev.is_compiled(),
+                NIDev::AO(dev) => dev.got_instructions(),
+                NIDev::DO(dev) => dev.got_instructions(),
             })
             .map(|(name, _typed_dev)| name.to_string())
             .collect();
-        if running_dev_names.is_empty() {
-            return Ok(())
-        };
-
         /* ToDo: Maybe add a consistency check here: no clash between any exports (ref clk, start_trig, samp_clk) */
 
         // Prepare thread sync mechanisms
@@ -250,19 +251,19 @@ impl Streamer {
         let mut start_sync = HashMap::new();
         if let Some(primary_dev_name) = self.get_starts_last() {
             // Sanity check
-            if !running_dev_names.contains(&primary_dev_name) {
+            if !active_dev_names.contains(&primary_dev_name) {
                 return Err(format!(
                     "NIStreamer.starts_last is set to Some({primary_dev_name}) but this name is not found in the running device list: \n\
                     {:?}\n\
                     Either name {primary_dev_name} is invalid or this device didn't get any instructions and will not run at all",
-                    running_dev_names
+                    active_dev_names
                 ))
             };
 
             // Create and pack sender-receiver pairs
             let mut recvr_vec = Vec::new();
             // - first create all the secondaries
-            for dev_name in running_dev_names.iter().filter(|dev_name| dev_name.to_string() != primary_dev_name.clone()) {
+            for dev_name in active_dev_names.iter().filter(|dev_name| dev_name.to_string() != primary_dev_name.clone()) {
                 let (sender, recvr) = channel();
                 recvr_vec.push(recvr);
                 start_sync.insert(
@@ -276,7 +277,7 @@ impl Streamer {
                 StartSync::Primary(recvr_vec)
             );
         } else {
-            for dev_name in running_dev_names.iter() {
+            for dev_name in active_dev_names.iter() {
                 start_sync.insert(
                     dev_name.to_string(),
                     StartSync::None,
@@ -286,7 +287,7 @@ impl Streamer {
 
         // FixMe: this is a temporary dirty hack.
         //  Transfer device objects to a separate IndexMap to be able to wrap them into Arc<Mutex<>> for multithreading
-        for dev_name in running_dev_names {
+        for dev_name in active_dev_names {
             let dev = self.devs.shift_remove(&dev_name).unwrap();
             self.running_devs.insert(dev_name, Arc::new(Mutex::new(dev)));
         }

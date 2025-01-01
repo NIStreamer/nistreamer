@@ -70,24 +70,31 @@ impl StreamerWrap {
     // endregion
 
     // region Compile
+    fn got_instructions(&self) -> bool {
+        self.inner.got_instructions()
+    }
+
     fn last_instr_end_time(&self) -> Option<f64> {
         self.inner.last_instr_end_time()
     }
 
-    fn total_run_time(&self) -> Option<f64> {
+    fn total_run_time(&self) -> f64 {
         self.inner.total_run_time()
     }
 
     #[pyo3(signature = (stop_time=None))]
-    fn compile(&mut self, stop_time: Option<f64>) -> PyResult<Option<f64>> {
+    fn compile(&mut self, stop_time: Option<f64>) -> PyResult<f64> {
         match self.inner.compile(stop_time) {
             Ok(total_run_time) => Ok(total_run_time),
             Err(msg) => Err(PyValueError::new_err(msg)),
         }
     }
 
-    fn is_fresh_compiled(&self) -> bool {
-        self.inner.is_fresh_compiled()
+    fn validate_compile_cache(&self) -> PyResult<()> {
+        match self.inner.validate_compile_cache() {
+            Ok(()) => Ok(()),
+            Err(msg) => PyValueError::new_err(msg)
+        }
     }
 
     fn clear_edit_cache(&mut self) {
