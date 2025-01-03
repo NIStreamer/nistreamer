@@ -145,17 +145,20 @@ use crate::flat_wrap::StreamerWrap;
 
 extern crate base_streamer;
 use base_streamer::fn_lib_tools::StdFnLib;
-extern crate usr_fn_lib;
+#[cfg(feature = "usr_fn_lib")]
 use usr_fn_lib::UsrFnLib;
 
 #[pymodule]
 fn nistreamer_backend(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<StreamerWrap>()?;
     m.add_class::<StdFnLib>()?;
-    m.add_class::<UsrFnLib>()?;
     m.add_function(wrap_pyfunction!(reset_dev, m)?)?;
     m.add_function(wrap_pyfunction!(connect_terms, m)?)?;
     m.add_function(wrap_pyfunction!(disconnect_terms, m)?)?;
+
+    #[cfg(feature = "usr_fn_lib")]
+    m.add_class::<UsrFnLib>()?;
+
     Ok(())
 }
 

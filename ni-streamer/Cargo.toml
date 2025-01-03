@@ -16,9 +16,12 @@ path = "src/main.rs"
 
 [dependencies]
 base_streamer = { path = "../../base-streamer" }
-usr_fn_lib = {path = "../../usr-fn-lib"}
+usr_fn_lib = { path = "../../usr-fn-lib", optional = true }
 indexmap = "2.3.0"
 pyo3 = { version = "0.22.1", features = ["multiple-pymethods"] }  # "extension-module"
 libc = "0.2.147"
 parking_lot = "0.12.2"
-itertools = "0.13.0"
+itertools = "0.14.0"
+
+[features]
+usr_fn_lib = ["dep:usr_fn_lib"]  # To enable, build with `--features usr_fn_lib` flag
