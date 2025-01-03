@@ -72,8 +72,7 @@ def iplot(chan_list, start_time=None, end_time=None, nsamps=1000, renderer='brow
     #  Consider making this function a method of NIStreamer class to get clear access to streamer_wrap
     streamer_wrap = chan_list[0]._streamer
 
-    if not streamer_wrap.is_fresh_compiled():
-        raise ValueError("Streamer is not fresh-compiled. (Re)-compile before calculating signal")
+    streamer_wrap.validate_compile_cache()
 
     total_run_time = streamer_wrap.total_run_time()
     if start_time is not None:
