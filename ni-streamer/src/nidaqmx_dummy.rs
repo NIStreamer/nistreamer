@@ -65,10 +65,14 @@
 //! For more details on the NI-DAQmx C driver and its capabilities, please refer to the
 //! [NI-DAQmx C Reference](https://www.ni.com/docs/en-US/bundle/ni-daqmx-c-api-ref/page/cdaqmx/help_file_title.html).
 
+use std::cell::{Cell, RefCell};
+use std::fs::File;
+use std::io::{Write, Error};
+use serde::Serialize;
+use indexmap::IndexMap;
 use std::ffi::NulError;
 use libc;
 type CInt32 = libc::c_int;
-
 pub const DAQMX_VAL_STARTTRIGGER: CInt32 = 12491;
 pub const DAQMX_VAL_SAMPLECLOCK: CInt32 = 12487;
 
@@ -89,6 +93,11 @@ impl ToString for DAQmxError {
 impl From<NulError> for DAQmxError {
     fn from(value: NulError) -> Self {
         DAQmxError::new(format!("Failed to convert '{}' to CString", value.to_string()))
+    }
+}
+impl From<std::io::Error> for DAQmxError {
+    fn from(value: Error) -> Self {
+        DAQmxError::new(value.to_string())
     }
 }
 
@@ -124,13 +133,16 @@ impl From<NulError> for DAQmxError {
 /// # Note
 ///
 /// Ensure that the device name provided is valid and that the device is accessible when invoking this function.
-pub fn reset_device(_name: &str) -> Result<(), DAQmxError> {
+pub fn reset_device(name: &str) -> Result<(), DAQmxError> {
+    println!("nidaqmx::reset_device(name={name}) called");
     Ok(())
 }
-pub fn connect_terms(_src: &str, _dest: &str) -> Result<(), DAQmxError> {
+pub fn connect_terms(src: &str, dest: &str) -> Result<(), DAQmxError> {
+    println!("nidaqmx::connect_terms(src={src}, dest={dest}) called");
     Ok(())
 }
-pub fn disconnect_terms(_src: &str, _dest: &str) -> Result<(), DAQmxError> {
+pub fn disconnect_terms(src: &str, dest: &str) -> Result<(), DAQmxError> {
+    println!("nidaqmx::disconnect_terms(src={src}, dest={dest}) called");
     Ok(())
 }
 
@@ -158,20 +170,73 @@ pub fn disconnect_terms(_src: &str, _dest: &str) -> Result<(), DAQmxError> {
 /// # Note
 ///
 /// Ensure you have the necessary NI-DAQmx drivers and libraries installed and accessible when using this struct and its associated methods.
-pub struct NiTask {}
+#[derive(Serialize)]
+pub struct NiTask {
+    samp_rate: Cell<f64>,
+    seq_len: Cell<u64>,
+    buf_size: Cell<usize>,
+    dev_name: RefCell<String>,
+    ao_chans: RefCell<IndexMap<String, Vec<f64>>>,
+    do_chans: RefCell<IndexMap<String, Vec<u32>>>,
+    start_trig_in: RefCell<Option<String>>,
+    start_trig_out: RefCell<Option<String>>,
+    samp_clk_in: RefCell<Option<String>>,
+    samp_clk_out: RefCell<Option<String>>,
+    ref_clk_in: RefCell<Option<String>>,
+}
 
 impl NiTask {
+    // File dump switches:
+    /*
+        If `DUMP_INFO` is `true`, `NiTask::stop()` call will save serialized `NiTask` to `dev_name.json`
+        in the current working directory.
+
+        In addition, if `DUMP_SAMPS` is also `true`, samples from all `write_analog/digital_...()` calls
+        will be accumulated by `NiTask` and then also included into same dump file.
+        CAUTION - this mode will accumulate ALL samples for the entire sequence duration and not just
+        the single-write buffer potentially resulting in a huge amount of data held in RAM at once.
+        Only use this mode with low sample rate and/or short sequences.
+    */
+    const DUMP_INFO: bool = true;
+    const DUMP_SAMPS: bool = false;
+
     pub fn new() -> Result<Self, DAQmxError> {
-        Ok(Self {})
+        Ok(Self {
+            samp_rate: Cell::new(0.0),
+            seq_len: Cell::new(0),
+            buf_size: Cell::new(0),
+            dev_name: RefCell::new("".to_string()),
+            ao_chans: RefCell::new(IndexMap::new()),
+            do_chans: RefCell::new(IndexMap::new()),
+            start_trig_in: RefCell::new(None),
+            start_trig_out: RefCell::new(None),
+            samp_clk_in: RefCell::new(None),
+            samp_clk_out: RefCell::new(None),
+            ref_clk_in: RefCell::new(None),
+        })
     }
 
     pub fn clear(&self) -> Result<(), DAQmxError> {
+        self.samp_rate.set(0.0);
+        self.seq_len.set(0);
+        self.buf_size.set(0);
+        self.dev_name.borrow_mut().clear();
+        self.ao_chans.borrow_mut().clear();
+        self.do_chans.borrow_mut().clear();
+        *self.start_trig_in.borrow_mut() = None;
+        *self.start_trig_out.borrow_mut() = None;
+        *self.samp_clk_in.borrow_mut() = None;
+        *self.samp_clk_out.borrow_mut() = None;
+        *self.ref_clk_in.borrow_mut() = None;
         Ok(())
     }
     pub fn start(&self) -> Result<(), DAQmxError> {
         Ok(())
     }
     pub fn stop(&self) -> Result<(), DAQmxError> {
+        if Self::DUMP_INFO {
+            self.dump_to_file()?;
+        }
         Ok(())
     }
     pub fn wait_until_done(&self, _timeout: Option<f64>) -> Result<(), DAQmxError> {
@@ -182,25 +247,46 @@ impl NiTask {
         Ok(())
     }
 
-    pub fn cfg_samp_clk_timing(&self, _clk_src: &str, _samp_rate: f64, _seq_len: u64) -> Result<(), DAQmxError> {
+    pub fn cfg_samp_clk_timing(&self, clk_src: &str, samp_rate: f64, seq_len: u64) -> Result<(), DAQmxError> {
+        self.samp_rate.set(samp_rate);
+        self.seq_len.set(seq_len);
+        *self.samp_clk_in.borrow_mut() = Some(clk_src.to_string());
+        if Self::DUMP_SAMPS {
+            self.ao_chans.borrow_mut().values_mut().for_each(|vec| *vec = Vec::with_capacity(seq_len as usize));
+            self.do_chans.borrow_mut().values_mut().for_each(|vec| *vec = Vec::with_capacity(seq_len as usize));
+        }
         Ok(())
     }
 
-    pub fn cfg_output_buf(&self, _buf_size: usize) -> Result<(), DAQmxError> {
+    pub fn cfg_output_buf(&self, buf_size: usize) -> Result<(), DAQmxError> {
+        self.buf_size.set(buf_size);
         Ok(())
     }
 
-    pub fn create_ao_chan(&self, _name: &str) -> Result<(), DAQmxError> {
+    pub fn create_ao_chan(&self, name: &str) -> Result<(), DAQmxError> {
+        if let Some(dev_name) = Self::extract_dev_name(name) {
+            *self.dev_name.borrow_mut() = dev_name.to_string();
+        }
+        self.ao_chans.borrow_mut().insert(name.to_string(), Vec::new());
         Ok(())
     }
 
-    pub fn create_do_chan(&self, _name: &str) -> Result<(), DAQmxError> {
+    pub fn create_do_chan(&self, name: &str) -> Result<(), DAQmxError> {
+        if let Some(dev_name) = Self::extract_dev_name(name) {
+            *self.dev_name.borrow_mut() = dev_name.to_string();
+        }
+        self.do_chans.borrow_mut().insert(name.to_string(), Vec::new());
         Ok(())
     }
 
-    pub fn write_digital_port(&self, _samp_buf: &[u32], samp_num: usize, _timeout: Option<f64>) -> Result<usize, DAQmxError> {
-        let approx_wait_time = 0.8 * 100e-9 * samp_num as f64;  // 100 ns - sample clock period assuming 10 MSa/s sampling rate for DO card
-        std::thread::sleep(std::time::Duration::from_secs_f64(approx_wait_time));
+    pub fn write_digital_port(&self, samp_buf: &[u32], samp_num: usize, _timeout: Option<f64>) -> Result<usize, DAQmxError> {
+        if Self::DUMP_SAMPS {
+            for (chan_idx, chan_samps) in self.do_chans.borrow_mut().values_mut().enumerate() {
+                chan_samps.extend_from_slice(&samp_buf[chan_idx * samp_num .. (chan_idx + 1) * samp_num]);
+            }
+        }
+        // let approx_wait_time = 0.8 * 100e-9 * samp_num as f64;  // 100 ns - sample clock period assuming 10 MSa/s sampling rate for DO card
+        // std::thread::sleep(std::time::Duration::from_secs_f64(approx_wait_time));
         Ok(samp_num)
     }
 
@@ -210,9 +296,14 @@ impl NiTask {
         Ok(samp_num)
     }
 
-    pub fn write_analog(&self, _samp_buf: &[f64], samp_num: usize, _timeout: Option<f64>) -> Result<usize, DAQmxError> {
-        let approx_wait_time = 0.8 * 1e-6 * samp_num as f64;  // 1 us - sample clock period assuming 1 MSa/s sampling rate for AO card
-        std::thread::sleep(std::time::Duration::from_secs_f64(approx_wait_time));
+    pub fn write_analog(&self, samp_buf: &[f64], samp_num: usize, _timeout: Option<f64>) -> Result<usize, DAQmxError> {
+        if Self::DUMP_SAMPS {
+            for (chan_idx, chan_samps) in self.ao_chans.borrow_mut().values_mut().enumerate() {
+                chan_samps.extend_from_slice(&samp_buf[chan_idx * samp_num .. (chan_idx + 1) * samp_num]);
+            }
+        }
+        // let approx_wait_time = 0.8 * 1e-6 * samp_num as f64;  // 1 us - sample clock period assuming 1 MSa/s sampling rate for AO card
+        // std::thread::sleep(std::time::Duration::from_secs_f64(approx_wait_time));
         Ok(samp_num)
     }
 
@@ -220,7 +311,8 @@ impl NiTask {
         Ok(())
     }
 
-    pub fn set_ref_clk_src(&self, _src: &str) -> Result<(), DAQmxError> {
+    pub fn set_ref_clk_src(&self, src: &str) -> Result<(), DAQmxError> {
+        *self.ref_clk_in.borrow_mut() = Some(src.to_string());
         Ok(())
     }
 
@@ -230,7 +322,8 @@ impl NiTask {
         Ok(())
     }
 
-    pub fn cfg_dig_edge_start_trigger(&self, _trigger_source: &str) -> Result<(), DAQmxError> {
+    pub fn cfg_dig_edge_start_trigger(&self, trigger_source: &str) -> Result<(), DAQmxError> {
+        *self.start_trig_in.borrow_mut() = Some(trigger_source.to_string());
         Ok(())
     }
 
@@ -238,11 +331,32 @@ impl NiTask {
         Ok(0)
     }
 
-    pub fn export_signal(&self, _signal_id: CInt32, _output_terminal: &str) -> Result<(), DAQmxError> {
+    pub fn export_signal(&self, signal_id: CInt32, output_terminal: &str) -> Result<(), DAQmxError> {
+        match signal_id {
+            DAQMX_VAL_STARTTRIGGER => *self.start_trig_out.borrow_mut() = Some(output_terminal.to_string()),
+            DAQMX_VAL_SAMPLECLOCK => *self.samp_clk_out.borrow_mut() = Some(output_terminal.to_string()),
+            _ => println!("NiTask::export_signal() - unknown signal_id: {signal_id}"),
+        }
         Ok(())
     }
 
     pub fn get_write_total_samp_per_chan_generated(&self) -> Result<u64, DAQmxError> {
         Ok(0)
+    }
+
+    /// Extracts "dev_name" assuming channel name format "/dev_name/ao0" or "/dev_name/port0"
+    fn extract_dev_name(full_chan_name: &str) -> Option<&str> {
+        let mut parts = full_chan_name.split('/');
+        parts.nth(1)
+    }
+
+    fn dump_to_file(&self) -> Result<(), std::io::Error> {
+        let serialized = serde_json::to_string(&self)?;
+
+        let file_path = format!("{}.json", self.dev_name.borrow());
+        let mut file = File::create(file_path)?;
+        file.write_all(serialized.as_bytes())?;
+
+        Ok(())
     }
 }

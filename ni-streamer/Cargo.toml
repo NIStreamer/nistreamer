@@ -22,10 +22,12 @@ pyo3 = { version = "0.22.1", features = ["multiple-pymethods"] }  # "extension-m
 libc = "0.2.147"
 parking_lot = "0.12.2"
 itertools = "0.14.0"
+serde = { version = "1.0.217", optional = true, features = ["derive"]}
+serde_json = { version = "1.0.135", optional = true}
 
 # To enable features, build with `--features` flag.
 #   single feature example: --features usr_fn_lib
 #        multiple features: --features "usr_fn_lib, nidaqmx_dummy"
 [features]
 usr_fn_lib = ["dep:usr_fn_lib"]
-nidaqmx_dummy = []
+nidaqmx_dummy = ["dep:serde", "dep:serde_json", "indexmap/serde"]
