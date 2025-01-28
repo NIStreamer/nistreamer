@@ -1,4 +1,4 @@
-from niexpctrl_backend import Experiment as RawStreamer
+from nistreamer_backend import StreamerWrap
 from .channel import AOChanProxy, DOChanProxy
 from .utils import reset_dev
 from typing import Union
@@ -8,7 +8,7 @@ class BaseCardProxy:
 
     def __init__(
             self,
-            _streamer: RawStreamer,
+            _streamer: StreamerWrap,
             max_name: str,
             nickname=None
     ):
@@ -16,11 +16,11 @@ class BaseCardProxy:
         self.max_name = max_name
         self._nickname = nickname
 
-        self._chan_dict = {}
+        self._chans = dict()
 
     def __getitem__(self, item):
-        if item in self._chan_dict:
-            return self._chan_dict[item]
+        if item in self._chans:
+            return self._chans[item]
         else:
             raise KeyError(f'There is no channel "{item}"')
 
@@ -35,7 +35,7 @@ class BaseCardProxy:
         return (
             f'{self.max_name}\n'
             f'\n'
-            f'Channels: {list(self._chan_dict.keys())}\n'
+            f'Channels: {list(self._chans.keys())}\n'
             f'\n'
             f'Hardware settings:\n'
             f'\tSample rate: {self.samp_rate:,} Sa/s\n'
@@ -55,10 +55,7 @@ class BaseCardProxy:
 
     @property
     def nickname(self):
-        if self._nickname is not None:
-            return self._nickname
-        else:
-            return self.max_name
+        return self._nickname if self._nickname is not None else self.max_name
 
     # region Hardware settings
     @property
@@ -106,21 +103,18 @@ class BaseCardProxy:
     def min_bufwrite_timeout(self) -> Union[float, None]:
         return self._streamer.dev_get_min_bufwrite_timeout(name=self.max_name)
     @min_bufwrite_timeout.setter
-    def min_bufwrite_timeout(self, min_timeout: Union[str, None]):
+    def min_bufwrite_timeout(self, min_timeout: Union[float, None]):
         self._streamer.dev_set_min_bufwrite_timeout(name=self.max_name, min_timeout=min_timeout)
     # endregion
 
     def clear_edit_cache(self):
-        self._streamer.device_clear_edit_cache(name=self.max_name)
-        self._streamer.device_clear_compile_cache(name=self.max_name)
+        self._streamer.dev_clear_edit_cache(name=self.max_name)
 
     def reset(self):
         reset_dev(name=self.max_name)
 
     def last_instr_end_time(self):
-        return self._streamer.device_last_instr_end_time(
-            self.max_name
-        )
+        return self._streamer.dev_last_instr_end_time(name=self.max_name)
 
 
 class AOCardProxy(BaseCardProxy):
@@ -128,12 +122,20 @@ class AOCardProxy(BaseCardProxy):
     def __repr__(self):
         return 'AO card ' + super().__repr__()
 
-    def add_chan(self, chan_idx: int, default_value: float = 0., nickname: str = None, proxy_class=AOChanProxy):
+    def add_chan(
+            self,
+            chan_idx: int,
+            dflt_val: float = 0.0,
+            rst_val: float = 0.0,
+            nickname: str = None,
+            proxy_class=AOChanProxy
+    ):
         # Raw Rust NIStreamer call
-        self._streamer.add_ao_channel(
-            self.max_name, 
-            channel_id=chan_idx,  # FixMe[Rust]: maybe change `channel_id` to `chan_idx`,
-            default_value=default_value
+        self._streamer.add_ao_chan(
+            dev_name=self.max_name,
+            chan_idx=chan_idx,
+            dflt_val=dflt_val,
+            rst_val=rst_val
         )
         # Instantiate proxy object
         chan_proxy = proxy_class(
@@ -142,24 +144,31 @@ class AOCardProxy(BaseCardProxy):
             chan_idx=chan_idx,
             nickname=nickname
         )
-        self._chan_dict[chan_proxy.chan_name] = chan_proxy
+        self._chans[chan_proxy.chan_name] = chan_proxy
         return chan_proxy
 
 
 class DOCardProxy(BaseCardProxy):
 
     def __repr__(self):
-        return 'DO card ' + super().__repr__()
+        return 'DO card ' + super().__repr__() + f'\n\n\tConst fns only: {self.const_fns_only}'
 
-    def add_chan(self, port_idx: int, line_idx: int, default_value: bool = False, nickname: str = None, proxy_class=DOChanProxy):
+    def add_chan(
+            self,
+            port_idx: int,
+            line_idx: int,
+            dflt_val: bool = False,
+            rst_val: bool = False,
+            nickname: str = None,
+            proxy_class=DOChanProxy
+    ):
         # Raw Rust NIStreamer call
-        self._streamer.add_do_channel(
-            self.max_name, 
-            port_id=port_idx,
-            # FixMe[Rust]: maybe change `port_id` to `port_idx`
-            #  - idx is associated with "int" - values from 0 to N-1, while "id" is more general
-            line_id=line_idx,  # FixMe[Rust]: maybe change `channel_id` to `chan_idx`,
-            default_value=1. if default_value else 0.  # ToDo: remove this hack when AO/DO types are split in Rust backend
+        self._streamer.add_do_chan(
+            dev_name=self.max_name,
+            port_idx=port_idx,
+            line_idx=line_idx,
+            dflt_val=dflt_val,
+            rst_val=rst_val,
         )
         # Instantiate proxy object
         chan_proxy = proxy_class(
@@ -169,5 +178,13 @@ class DOCardProxy(BaseCardProxy):
             line_idx=line_idx,
             nickname=nickname
         )
-        self._chan_dict[chan_proxy.chan_name] = chan_proxy
+        self._chans[chan_proxy.chan_name] = chan_proxy
         return chan_proxy
+
+    @property
+    def const_fns_only(self):
+        return self._streamer.dodev_get_const_fns_only(name=self.max_name)
+
+    @const_fns_only.setter
+    def const_fns_only(self, val):
+        self._streamer.dodev_set_const_fns_only(name=self.max_name, val=val)

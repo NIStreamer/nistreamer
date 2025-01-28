@@ -1,33 +1,34 @@
-from niexpctrl_backend import Experiment as RawStreamer  # FixMe[Rust]: rename Experiment to NIStreamer
+from nistreamer_backend import StreamerWrap, StdFnLib
+from abc import ABC, abstractmethod
 
 
-class BaseChanProxy:
+class BaseChanProxy(ABC):
     def __init__(
             self,
-            _streamer: RawStreamer,
+            _streamer: StreamerWrap,
             _card_max_name: str,
             nickname: str = None
     ):
         self._streamer = _streamer
         self._card_max_name = _card_max_name
         self._nickname = nickname
+        self._std_fn_lib = StdFnLib()
 
     def __repr__(self, card_info=False):
         return (
             f'Channel {self.chan_name} on card {self._card_max_name}\n'
-            f'Default value: {self.default_val}'
+            f'Default value: {self.dflt_val}\n'
+            f'  Reset value: {self.rst_val}'
         )
 
     @property
+    @abstractmethod
     def chan_name(self):
-        raise NotImplementedError
-
-    @property
-    def default_val(self):
-        return self._streamer.chan_get_default_val(
-            dev_name=self._card_max_name,
-            chan_name=self.chan_name
-        )
+        # Channel naming format is set in Rust backed.
+        # One should call StreamerWrap method to get the name string instead of assembling it manually here.
+        # Since StreamerWrap's methods for AO and DO cards are different,
+        # each subclass has to re-implement this property to call the corresponding Rust method
+        pass
 
     @property
     def nickname(self):
@@ -36,57 +37,62 @@ class BaseChanProxy:
         else:
             return self.chan_name
 
-    def clear_edit_cache(self):
-        self._streamer.channel_clear_edit_cache(
-            dev_name=self._card_max_name,
-            chan_name=self.chan_name
-        )
-        self._streamer.channel_clear_compile_cache(
-            dev_name=self._card_max_name,
-            chan_name=self.chan_name
-        )
+    @property
+    @abstractmethod
+    def dflt_val(self):
+        # AO and DO cards have different sample types and thus call different Rust functions,
+        # so each subclass has to re-implement this property
+        pass
 
-    def calc_signal(self, t_start=None, t_end=None, nsamps=1000):
+    @property
+    @abstractmethod
+    def rst_val(self):
+        # AO and DO cards have different sample types and thus call different Rust functions,
+        # so each subclass has to re-implement this property
+        pass
 
-        # FixMe[Rust]: panic message `PanicException: Attempting to calculate signal on not-compiled channel ao0`
-        #  - add card_max_name to know which card this is about
+    @abstractmethod
+    def _add_instr(self, func, t, dur_spec):
+        # AO and DO cards accept different function object types and thus call different Rust functions.
+        # so each subclass has to re-implement this method
+        pass
 
-        # ToDo: figure out details of edit_cache/compile_cache.
-        #  `self._dll.is_fresh_compiled()` may still give True even after introducing changes???
-        # if not self._dll.is_fresh_compiled():
-        #     self._dll.compile()
-        # ToDo: until then go inefficient but safe - recompile from scratch every time
-        # self._dll.compile()
+    def add_instr(self, func, t, dur, keep_val=False):
+        self._add_instr(func=func, t=t, dur_spec=(dur, keep_val))
+        return dur
 
-        t_start = t_start if t_start is not None else 0.0
-        # FixMe: if channel was compiled with some `stop_time`,
-        #  using `last_instr_end_time()` will "truncate" the padding tail.
-        #  Ideally, one would rather use `BaseChannel::total_run_time()` but it is not exposed now.
-        #  Either expose it or consider changing the signature of the underlying `BaseChannel::calc_signal_nsamps()`
-        #  to accept `Option<start_time>` and `Option<end_time>`
-        t_end = t_end if t_end is not None else self.last_instr_end_time()
-
-        signal_arr = self._streamer.channel_calc_signal_nsamps(
-            dev_name=self._card_max_name,
-            chan_name=self.chan_name,
-            start_time=t_start,  # FixMe[Rust]: unify `start_time` and `t_start`
-            end_time=t_end,
-            num_samps=nsamps,  # FixMe[Rust]: unify `num_samps` and `nsamps`
-        )
-
-        return t_start, t_end, signal_arr
+    def add_gothis_instr(self, func, t):
+        self._add_instr(func=func, t=t, dur_spec=None)
 
     def last_instr_end_time(self):
-        return self._streamer.channel_last_instr_end_time(
+        return self._streamer.chan_last_instr_end_time(
             dev_name=self._card_max_name,
             chan_name=self.chan_name
         )
+
+    def clear_edit_cache(self):
+        self._streamer.chan_clear_edit_cache(
+            dev_name=self._card_max_name,
+            chan_name=self.chan_name
+        )
+
+    @abstractmethod
+    def calc_signal(self, start_time=None, end_time=None, nsamps=1000):
+        # AO and DO cards have different sample types and thus call different Rust functions,
+        # so each subclass has to re-implement this method
+        pass
+
+    @abstractmethod
+    def eval_point(self, t):
+        # AO and DO cards have different sample types and thus call different Rust functions,
+        # so each subclass has to re-implement this method
+        pass
 
 
 class AOChanProxy(BaseChanProxy):
     def __init__(
             self,
-            _streamer: RawStreamer,
+            _streamer: StreamerWrap,
             _card_max_name: str,
             chan_idx: int,
             nickname: str = None
@@ -104,70 +110,97 @@ class AOChanProxy(BaseChanProxy):
 
     @property
     def chan_name(self):
-        return f'ao{self.chan_idx}'
-
-    def const(self, t, dur, val):
-        self._streamer.constant(
+        return self._streamer.ao_chan_name(
             dev_name=self._card_max_name,
-            chan_name=self.chan_name,
-            t=t,
-            duration=dur,
-            value=val,
+            chan_idx=self.chan_idx
         )
-        return dur
+
+    @property
+    def dflt_val(self):
+        return self._streamer.ao_chan_dflt_val(
+            dev_name=self._card_max_name,
+            chan_idx=self.chan_idx
+        )
+
+    @property
+    def rst_val(self):
+        return self._streamer.ao_chan_rst_val(
+            dev_name=self._card_max_name,
+            chan_idx=self.chan_idx
+        )
+
+    def calc_signal(self, start_time=None, end_time=None, nsamps=1000):
+        return self._streamer.ao_chan_calc_nsamps(
+            dev_name=self._card_max_name,
+            chan_idx=self.chan_idx,
+            n_samps=nsamps,
+            start_time=start_time,
+            end_time=end_time
+        )
+
+    def eval_point(self, t):
+        return self._streamer.ao_chan_eval_point(
+            dev_name=self._card_max_name,
+            chan_idx=self.chan_idx,
+            t=t
+        )
+
+    def _add_instr(self, func, t, dur_spec):
+        self._streamer.ao_chan_add_instr(
+            dev_name=self._card_max_name,
+            chan_idx=self.chan_idx,
+            func=func,
+            t=t,
+            dur_spec=dur_spec
+        )
+
+    # region Convenience methods to access the most common StdFnLib functions
+    def const(self, t, dur, val):
+        return self.add_instr(
+            func=self._std_fn_lib.ConstF64(val=val),
+            t=t,
+            dur=dur,
+            keep_val=False
+        )
     
     def go_const(self, t, val):
-        self._streamer.go_constant(
-            dev_name=self._card_max_name,
-            chan_name=self.chan_name,
-            t=t,
-            value=val,
+        self.add_gothis_instr(
+            func=self._std_fn_lib.ConstF64(val=val),
+            t=t
         )
 
     def sine(self, t, dur, amp, freq, phase=0, dc_offs=0, keep_val=False):
-        self._streamer.sine(
-            dev_name=self._card_max_name,
-            chan_name=self.chan_name,
+        return self.add_instr(
+            func=self._std_fn_lib.Sine(amp=amp, freq=freq, phase=phase, offs=dc_offs),
             t=t,
-            duration=dur,
-            amplitude=amp,
-            freq=freq,
-            phase=phase if phase != 0 else None,
-            # FixMe[Rust]: better to use 0.0 instead of None for default. Is it conveninient in Rust?
-            dc_offset=dc_offs if dc_offs != 0 else None,  # FixMe[Rust]: better to use 0.0 instead of None for default
-            keep_val=keep_val,
+            dur=dur,
+            keep_val=keep_val
         )
-        return dur
     
     def go_sine(self, t, amp, freq, phase=0, dc_offs=0):
-        self._streamer.go_sine(
-            dev_name=self._card_max_name,
-            chan_name=self.chan_name,
-            t=t,
-            amplitude=amp,
-            freq=freq,
-            phase=phase if phase != 0 else None,
-            # FixMe[Rust]: better to use 0.0 instead of None for default. Is it conveninient in Rust?
-            dc_offset=dc_offs if dc_offs != 0 else None,  # FixMe[Rust]: better to use 0.0 instead of None for default
+        self.add_gothis_instr(
+            func=self._std_fn_lib.Sine(amp=amp, freq=freq, phase=phase, offs=dc_offs),
+            t=t
         )
 
     def linramp(self, t, dur, start_val, end_val, keep_val=True):
-        self._streamer.linramp(
-            dev_name=self._card_max_name,
-            chan_name=self.chan_name,
+        # Calculate linear function parameters y = a*x + b
+        a = (end_val - start_val) / dur
+        b = ((t + dur) * start_val - t * end_val) / dur
+
+        return self.add_instr(
+            func=self._std_fn_lib.LinFn(a=a, b=b),
             t=t,
-            duration=dur,
-            start_val=start_val, 
-            end_val=end_val,
-            keep_val=keep_val,
+            dur=dur,
+            keep_val=keep_val
         )
-        return dur
+    # endregion
 
 
 class DOChanProxy(BaseChanProxy):
     def __init__(
             self,
-            _streamer: RawStreamer,
+            _streamer: StreamerWrap,
             _card_max_name: str,
             port_idx: int,
             line_idx: int,
@@ -179,50 +212,105 @@ class DOChanProxy(BaseChanProxy):
             _card_max_name=_card_max_name,
             nickname=nickname
         )
-        self.port_idx = port_idx
-        self.line_idx = line_idx
+        self.port = port_idx
+        self.line = line_idx
 
     @property
     def chan_name(self):
-        return f'port{self.port_idx}/line{self.line_idx}'
+        return self._streamer.do_chan_name(
+            dev_name=self._card_max_name,
+            port=self.port,
+            line=self.line
+        )
 
     @property
-    def default_val(self):
-        float_val = self._streamer.chan_get_default_val(
+    def dflt_val(self):
+        return self._streamer.do_chan_dflt_val(
             dev_name=self._card_max_name,
-            chan_name=self.chan_name
+            port=self.port,
+            line=self.line
         )
-        # ToDo: remove this hack when AO/DO types are split in Rust backend
-        return True if float_val > 0.5 else False
 
-    def go_high(self, t):
-        self._streamer.go_high(
+    @property
+    def rst_val(self):
+        return self._streamer.do_chan_rst_val(
             dev_name=self._card_max_name,
-            chan_name=self.chan_name,
+            port=self.port,
+            line=self.line
+        )
+
+    @property
+    def const_fns_only(self):
+        return self._streamer.dodev_get_const_fns_only(name=self._card_max_name)
+
+    def calc_signal(self, start_time=None, end_time=None, nsamps=1000):
+        return self._streamer.do_chan_calc_nsamps(
+            dev_name=self._card_max_name,
+            port=self.port,
+            line=self.line,
+            n_samps=nsamps,
+            start_time=start_time,
+            end_time=end_time
+        )
+
+    def eval_point(self, t):
+        return self._streamer.do_chan_eval_point(
+            dev_name=self._card_max_name,
+            port=self.port,
+            line=self.line,
             t=t
+        )
+
+    def _unchecked_add_instr(self, func, t, dur_spec):
+        self._streamer.do_chan_add_instr(
+            dev_name=self._card_max_name,
+            port=self.port,
+            line=self.line,
+            func=func,
+            t=t,
+            dur_spec=dur_spec
+        )
+
+    def _add_instr(self, func, t, dur_spec):
+        if self.const_fns_only:
+            raise ValueError(
+                "Constant-functions-only mode is currently enabled for this device\n"
+                "* If you wanted to add a simple high/low/go_high/go_low instruction, "
+                "use the corresponding named method\n"
+                "* If you actually wanted to add a generic non-constant function, "
+                "you have to set `your_do_card.const_fns_only = False` to disable this mode\n"
+                "See docs for details about const-fns-only mode and performance considerations"
+            )
+        self._unchecked_add_instr(func=func, t=t, dur_spec=dur_spec)
+
+    # region Convenience methods to access the most common StdFnLib functions
+    def go_high(self, t):
+        self._unchecked_add_instr(
+            func=self._std_fn_lib.ConstBool(val=True),
+            t=t,
+            dur_spec=None
         )
 
     def go_low(self, t):
-        self._streamer.go_low(
-            dev_name=self._card_max_name,
-            chan_name=self.chan_name,
-            t=t
+        self._unchecked_add_instr(
+            func=self._std_fn_lib.ConstBool(val=False),
+            t=t,
+            dur_spec=None
         )
 
     def high(self, t, dur):
-        self._streamer.high(
-            dev_name=self._card_max_name,
-            chan_name=self.chan_name,
+        self._unchecked_add_instr(
+            func=self._std_fn_lib.ConstBool(val=True),
             t=t,
-            duration=dur
+            dur_spec=(dur, False)
         )
         return dur
 
     def low(self, t, dur):
-        self._streamer.low(
-            dev_name=self._card_max_name,
-            chan_name=self.chan_name,
+        self._unchecked_add_instr(
+            func=self._std_fn_lib.ConstBool(val=False),
             t=t,
-            duration=dur
+            dur_spec=(dur, False)
         )
         return dur
+    # endregion
