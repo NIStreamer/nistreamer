@@ -55,13 +55,13 @@ use indexmap::IndexMap;
 use parking_lot::Mutex;
 
 use base_streamer::device::BaseDev;
-use base_streamer::streamer::BaseStreamer;
+use base_streamer::streamer::{TagBaseDev, BaseStreamer};
 
-use crate::channel::{AOChan, DOChan};
 use crate::device::{AODev, DODev, NIDev, RunControl, StartSync, WorkerError};
 use crate::nidaqmx;
 use crate::nidaqmx::DAQmxError;
 use crate::worker_cmd_chan::{CmdChan, CmdRecvr, WorkerCmd};
+use itertools::Itertools;
 
 /// An extended version of the [`nicompiler_backend::Experiment`] struct, tailored to provide direct
 /// interfacing capabilities with NI devices.
@@ -94,13 +94,24 @@ pub struct Streamer {
     worker_handles: IndexMap<String, JoinHandle<Result<(), WorkerError>>>,  // FixMe [after Device move to streamer crate]: Maybe store individual device thread handle and report receiver in the Device struct
 }
 
-impl BaseStreamer<f64, AOChan, AODev, bool, DOChan, DODev> for Streamer {
-    fn devs(&self) -> &IndexMap<String, NIDev> {
-        &self.devs
+impl BaseStreamer for Streamer {
+    fn devs(&self) -> Vec<&dyn TagBaseDev> {
+        self.devs
+            .values()
+            .map(|ni_dev| match ni_dev {
+                NIDev::AO(dev) => dev as &dyn TagBaseDev,
+                NIDev::DO(dev) => dev as &dyn TagBaseDev,
+            })
+            .collect()
     }
-
-    fn devs_mut(&mut self) -> &mut IndexMap<String, NIDev> {
-        &mut self.devs
+    fn devs_mut(&mut self) -> Vec<&mut dyn TagBaseDev> {
+        self.devs
+            .values_mut()
+            .map(|ni_dev| match ni_dev {
+                NIDev::AO(dev) => dev as &mut dyn TagBaseDev,
+                NIDev::DO(dev) => dev as &mut dyn TagBaseDev,
+            })
+            .collect()
     }
 }
 
@@ -132,6 +143,46 @@ impl Streamer {
             worker_cmd_chan: CmdChan::new(),
             worker_report_recvrs: IndexMap::new(),
             worker_handles: IndexMap::new(),  // FixMe [after Device move to streamer crate]: Maybe store individual device thread handle and report receiver in the Device struct
+        }
+    }
+
+    pub fn add_ao_dev(&mut self, dev: AODev) -> Result<(), String> {
+        self.check_can_add_dev(dev.name())?;
+        self.devs.insert(dev.name(), NIDev::AO(dev));
+        Ok(())
+    }
+
+    pub fn add_do_dev(&mut self, dev: DODev) -> Result<(), String> {
+        self.check_can_add_dev(dev.name())?;
+        self.devs.insert(dev.name(), NIDev::DO(dev));
+        Ok(())
+    }
+
+    pub fn dev_names(&self) -> Vec<String> {
+        self.devs.keys().map(|name| name.clone()).collect()
+    }
+
+    pub fn borrow_dev(&self, name: String) -> Result<&NIDev, String> {
+        if self.devs.keys().contains(&name) {
+            Ok(self.devs.get(&name).unwrap())
+        } else {
+            Err(format!(
+                "There is no device with name {name} registered.\n\
+                The following device names are registered: {:?}",
+                self.devs.keys()
+            ))
+        }
+    }
+
+    pub fn borrow_dev_mut(&mut self, name: String) -> Result<&mut NIDev, String> {
+        if self.devs.keys().contains(&name) {
+            Ok(self.devs.get_mut(&name).unwrap())
+        } else {
+            Err(format!(
+                "There is no device with name {name} registered.\n\
+                The following device names are registered: {:?}",
+                self.devs.keys()
+            ))
         }
     }
 
