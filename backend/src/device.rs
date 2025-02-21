@@ -37,7 +37,6 @@ use itertools::Itertools;
 
 use base_streamer::channel::BaseChan;
 use base_streamer::device::BaseDev;
-use base_streamer::streamer::TypedDev;
 
 use crate::channel::{AOChan, DOChan, DOPort};
 use crate::utils::StreamCounter;
@@ -403,8 +402,9 @@ impl AODev {
         }
     }
 
-    pub fn add_chan_sort(&mut self, chan: AOChan) -> Result<(), String> {
-        self.add_chan(chan)?;
+    pub fn add_chan(&mut self, chan: AOChan) -> Result<(), String> {
+        self.check_can_add_chan(&chan)?;
+        self.chans.insert(chan.name(), chan);
         self.chans.sort_by(
             |_k1, v1, _k2, v2| {
                 v1.idx().cmp(&v2.idx())
@@ -412,9 +412,33 @@ impl AODev {
         );
         Ok(())
     }
+
+    pub fn borrow_chan(&self, name: String) -> Result<&AOChan, String> {
+        if self.chans.keys().contains(&name) {
+            Ok(self.chans.get(&name).unwrap())
+        } else {
+            Err(format!(
+                "AO device {} does not have a channel {name} registered. Registered channels are: {:?}",
+                self.name.clone(), self.chans.keys()
+            ))
+        }
+    }
+
+    pub fn borrow_chan_mut(&mut self, name: String) -> Result<&mut AOChan, String> {
+        if self.chans.keys().contains(&name) {
+            Ok(self.chans.get_mut(&name).unwrap())
+        } else {
+            Err(format!(
+                "AO device {} does not have a channel {name} registered. Registered channels are: {:?}",
+                self.name.clone(), self.chans.keys()
+            ))
+        }
+    }
 }
 
-impl BaseDev<f64, AOChan> for AODev {
+impl BaseDev for AODev {
+    type Chan = AOChan;
+
     fn name(&self) -> String {
         self.name.clone()
     }
@@ -423,12 +447,16 @@ impl BaseDev<f64, AOChan> for AODev {
         self.samp_rate
     }
 
-    fn chans(&self) -> &IndexMap<String, AOChan> {
-        &self.chans
+    fn chans(&self) -> Vec<&AOChan> {
+        self.chans
+            .values()
+            .collect()
     }
 
-    fn chans_mut(&mut self) -> &mut IndexMap<String, AOChan> {
-        &mut self.chans
+    fn chans_mut(&mut self) -> Vec<&mut AOChan> {
+        self.chans
+            .values_mut()
+            .collect()
     }
 }
 
@@ -526,8 +554,9 @@ impl DODev {
         }
     }
 
-    pub fn add_chan_sort(&mut self, chan: DOChan) -> Result<(), String> {
-        self.add_chan(chan)?;
+    pub fn add_chan(&mut self, chan: DOChan) -> Result<(), String> {
+        self.check_can_add_chan(&chan)?;
+        self.chans.insert(chan.name(), chan);
         self.chans.sort_by(
             |_k1, v1, _k2, v2| {
                 let (p1, l1) = (v1.port(), v1.line());
@@ -541,6 +570,28 @@ impl DODev {
             }
         );
         Ok(())
+    }
+
+    pub fn borrow_chan(&self, name: String) -> Result<&DOChan, String> {
+        if self.chans.keys().contains(&name) {
+            Ok(self.chans.get(&name).unwrap())
+        } else {
+            Err(format!(
+                "DO device {} does not have a channel {name} registered. Registered channels are: {:?}",
+                self.name.clone(), self.chans.keys()
+            ))
+        }
+    }
+
+    pub fn borrow_chan_mut(&mut self, name: String) -> Result<&mut DOChan, String> {
+        if self.chans.keys().contains(&name) {
+            Ok(self.chans.get_mut(&name).unwrap())
+        } else {
+            Err(format!(
+                "DO device {} does not have a channel {name} registered. Registered channels are: {:?}",
+                self.name.clone(), self.chans.keys()
+            ))
+        }
     }
 
     pub fn get_const_fns_only(&self) -> bool {
@@ -574,7 +625,9 @@ impl DODev {
     }
 }
 
-impl BaseDev<bool, DOChan> for DODev {
+impl BaseDev for DODev {
+    type Chan = DOChan;
+
     fn name(&self) -> String {
         self.name.clone()
     }
@@ -583,12 +636,16 @@ impl BaseDev<bool, DOChan> for DODev {
         self.samp_rate
     }
 
-    fn chans(&self) -> &IndexMap<String, DOChan> {
-        &self.chans
+    fn chans(&self) -> Vec<&DOChan> {
+        self.chans
+            .values()
+            .collect()
     }
 
-    fn chans_mut(&mut self) -> &mut IndexMap<String, DOChan> {
-        &mut self.chans
+    fn chans_mut(&mut self) -> Vec<&mut DOChan> {
+        self.chans
+            .values_mut()
+            .collect()
     }
 
     fn clear_compile_cache(&mut self) {
@@ -888,8 +945,11 @@ impl RunControl for DODev {
 }
 // endregion
 
-// region NIDev (to treat AO and DO uniformly)
-pub type NIDev = TypedDev<AODev, DODev>;
+// region NIDev (to store AO and DO in the same collection)
+pub enum NIDev {
+    AO(AODev),
+    DO(DODev),
+}
 
 impl CommonHwCfg for NIDev {
     fn hw_cfg(&self) -> &HwCfg {

@@ -33,11 +33,23 @@ impl AOChan {
     pub fn idx(&self) -> usize {
         self.idx
     }
+
+    /// Generates full channel name string based on channel index - the single place where
+    /// the naming format of AO channels is written out explicitly.
+    ///
+    /// Use this function wherever channel name string is required instead of assembling it
+    /// manually with `format!(...)`. This will ensure everything automatically stays consistent
+    /// throughout the project even if naming format has to be changed.
+    pub fn name_fmt(idx: usize) -> String {
+        format!("ao{idx}")
+    }
 }
 
-impl BaseChan<f64> for AOChan {
+impl BaseChan for AOChan {
+    type Samp = f64;
+
     fn name(&self) -> String {
-        format!("ao{}", self.idx)
+        AOChan::name_fmt(self.idx)
     }
 
     fn samp_rate(&self) -> f64 {
@@ -121,11 +133,23 @@ impl DOChan {
     pub fn line(&self) -> usize {
         self.line
     }
+
+    /// Generates full channel name string based on port and line indices - the single place where
+    /// the naming format of DO channels is written out explicitly.
+    ///
+    /// Use this function wherever channel name string is required instead of assembling it
+    /// manually with `format!(...)`. This will ensure everything automatically stays consistent
+    /// throughout the project even if naming format has to be changed.
+    pub fn name_fmt(port: usize, line: usize) -> String {
+        format!("port{port}/line{line}")
+    }
 }
 
-impl BaseChan<bool> for DOChan {
+impl BaseChan for DOChan {
+    type Samp = bool;
+
     fn name(&self) -> String {
-        format!("port{}/line{}", self.port, self.line)
+        DOChan::name_fmt(self.port, self.line)
     }
 
     fn samp_rate(&self) -> f64 {
