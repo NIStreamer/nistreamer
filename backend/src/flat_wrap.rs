@@ -33,7 +33,7 @@ impl StreamerWrap {
         let dev = AODev::new(name, samp_rate);
         match self.inner.add_ao_dev(dev) {
             Ok(()) => Ok(()),
-            Err(msg) => Err(PyValueError::new_err(msg)),
+            Err(msg) => Err(PyKeyError::new_err(msg)),
         }
     }
 
@@ -41,7 +41,7 @@ impl StreamerWrap {
         let dev = DODev::new(name, samp_rate);
         match self.inner.add_do_dev(dev) {
             Ok(()) => Ok(()),
-            Err(msg) => Err(PyValueError::new_err(msg)),
+            Err(msg) => Err(PyKeyError::new_err(msg)),
         }
     }
 

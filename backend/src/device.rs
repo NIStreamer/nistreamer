@@ -418,8 +418,7 @@ impl AODev {
             Ok(self.chans.get(&name).unwrap())
         } else {
             Err(format!(
-                "AO device {} does not have a channel {name} registered.\n\
-                The following channel names are registered: {:?}",
+                "AO device {} does not have a channel {name} registered. Registered channels are: {:?}",
                 self.name.clone(), self.chans.keys()
             ))
         }
@@ -430,8 +429,7 @@ impl AODev {
             Ok(self.chans.get_mut(&name).unwrap())
         } else {
             Err(format!(
-                "AO device {} does not have a channel {name} registered.\n\
-                The following channel names are registered: {:?}",
+                "AO device {} does not have a channel {name} registered. Registered channels are: {:?}",
                 self.name.clone(), self.chans.keys()
             ))
         }
@@ -579,8 +577,7 @@ impl DODev {
             Ok(self.chans.get(&name).unwrap())
         } else {
             Err(format!(
-                "DO device {} does not have a channel {name} registered.\n\
-                The following channel names are registered: {:?}",
+                "DO device {} does not have a channel {name} registered. Registered channels are: {:?}",
                 self.name.clone(), self.chans.keys()
             ))
         }
@@ -591,8 +588,7 @@ impl DODev {
             Ok(self.chans.get_mut(&name).unwrap())
         } else {
             Err(format!(
-                "DO device {} does not have a channel {name} registered.\n\
-                The following channel names are registered: {:?}",
+                "DO device {} does not have a channel {name} registered. Registered channels are: {:?}",
                 self.name.clone(), self.chans.keys()
             ))
         }

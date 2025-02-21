@@ -167,8 +167,7 @@ impl Streamer {
             Ok(self.devs.get(&name).unwrap())
         } else {
             Err(format!(
-                "There is no device with name {name} registered.\n\
-                The following device names are registered: {:?}",
+                "There is no device with name {name} registered. Registered devices are: {:?}",
                 self.devs.keys()
             ))
         }
@@ -179,8 +178,7 @@ impl Streamer {
             Ok(self.devs.get_mut(&name).unwrap())
         } else {
             Err(format!(
-                "There is no device with name {name} registered.\n\
-                The following device names are registered: {:?}",
+                "There is no device with name {name} registered. Registered devices are: {:?}",
                 self.devs.keys()
             ))
         }
