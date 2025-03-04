@@ -157,10 +157,11 @@ pub trait RunControl: CommonHwCfg {
     /// `create_do_chan` method for each channel.
     ///
     /// The channel names are constructed using the format `/{device_name}/{channel_name}`.
-    fn create_task_chans(&self, task: &NiTask) -> Result<(), DAQmxError>;
+    fn create_task_chans(&mut self, task: &NiTask) -> Result<(), DAQmxError>;
     fn alloc_samp_bufs(&self, buf_size: usize) -> SampBufs;
     fn calc_samps(&self, samp_bufs: &mut SampBufs, start_pos: usize, end_pos: usize) -> Result<(), String>;
-    fn write_to_hardware(&self, bundle: &mut StreamBundle, bufs: &SampBufs, samp_num: usize) -> Result<usize, DAQmxError>;
+    fn write_to_hardware(&mut self, bundle: &mut StreamBundle, bufs: &SampBufs, samp_num: usize) -> Result<usize, DAQmxError>;
+    fn fill_with_last_written_vals(&self, bufs: &mut SampBufs, samp_num: usize) -> Result<(), String>;
 
     /// Streams an instruction signal to the specified NI-DAQ device.
     ///
@@ -225,7 +226,7 @@ pub trait RunControl: CommonHwCfg {
         };
         Ok(())
     }
-    fn cfg_run_(&self, bufsize_ms: f64) -> Result<(StreamBundle, SampBufs), WorkerError> {
+    fn cfg_run_(&mut self, bufsize_ms: f64) -> Result<(StreamBundle, SampBufs), WorkerError> {
         let buf_dur = bufsize_ms / 1000.0;
         let buf_write_timeout = match &self.hw_cfg().min_bufwrite_timeout {
             Some(min_timeout) => Some(f64::max(10.0*buf_dur, *min_timeout)),
@@ -262,7 +263,7 @@ pub trait RunControl: CommonHwCfg {
         Ok((stream_bundle, samp_buf))
     }
     fn stream_run_(
-        &self,
+        &mut self,
         stream_bundle: &mut StreamBundle,
         samp_bufs: &mut SampBufs,
         start_sync: &StartSync,
@@ -390,6 +391,7 @@ pub struct AODev {
     samp_rate: f64,
     chans: IndexMap<String, AOChan>,
     hw_cfg: HwCfg,
+    last_written_vals: IndexMap<String, Option<f64>>,
 }
 
 impl AODev {
@@ -399,6 +401,7 @@ impl AODev {
             samp_rate,
             chans: IndexMap::new(),
             hw_cfg: HwCfg::dflt(),
+            last_written_vals: IndexMap::new(),
         }
     }
 
@@ -433,6 +436,10 @@ impl AODev {
                 self.name.clone(), self.chans.keys()
             ))
         }
+    }
+
+    pub fn active_chan_names(&self) -> Vec<String> {
+        self.active_chans().iter().map(|chan| chan.name()).collect()
     }
 }
 
@@ -483,9 +490,11 @@ impl RunControl for AODev {
         self.compiled_stop_pos()
     }
 
-    fn create_task_chans(&self, task: &NiTask) -> Result<(), DAQmxError> {
-        for chan in self.active_chans() {
-            task.create_ao_chan(&format!("/{}/{}", self.max_name(), chan.name()))?;
+    fn create_task_chans(&mut self, task: &NiTask) -> Result<(), DAQmxError> {
+        self.last_written_vals.clear();
+        for chan_name in self.active_chan_names() {
+            task.create_ao_chan(&format!("/{}/{}", self.max_name(), chan_name))?;
+            self.last_written_vals.insert(chan_name, None);
         };
         Ok(())
     }
@@ -504,7 +513,7 @@ impl RunControl for AODev {
         BaseDev::calc_samps(self, &mut samp_buf[..], start_pos, end_pos)
     }
 
-    fn write_to_hardware(&self, bundle: &mut StreamBundle, bufs: &SampBufs, samp_num: usize) -> Result<usize, DAQmxError> {
+    fn write_to_hardware(&mut self, bundle: &mut StreamBundle, bufs: &SampBufs, samp_num: usize) -> Result<usize, DAQmxError> {
         let samp_buf = match bufs {
             SampBufs::AO(buf) => buf,
             other => return Err(DAQmxError::new(format!("AODev::write_to_hardware() received incorrect `SampBufs` variant {other:?}"))),
@@ -523,11 +532,48 @@ impl RunControl for AODev {
         }
 
         // Write to hardware
-        bundle.ni_task.write_analog(
+        let samps_written = bundle.ni_task.write_analog(
             &samp_buf[..],
             samp_num,
             bundle.buf_write_timeout.clone()
-        )
+        )?;
+
+        // Save the last written value for each channel
+        for (chan_row_idx, chan_name) in self.active_chan_names().iter().enumerate() {
+            let last_written_val = samp_buf.get((chan_row_idx + 1) * samp_num - 1).unwrap().clone();
+            if !self.last_written_vals.contains_key(chan_name) {
+                return Err(DAQmxError::new(format!("[BUG] Key {} was not registered in self.last_written_vals", chan_name)))
+            }
+            self.last_written_vals.insert(chan_name.clone(), Some(last_written_val));
+        };
+
+        Ok(samps_written)
+    }
+
+    fn fill_with_last_written_vals(&self, bufs: &mut SampBufs, samp_num: usize) -> Result<(), String> {
+        let samp_buf = match bufs {
+            SampBufs::AO(buf) => buf,
+            other => return Err(format!("AODev::write_to_hardware() received incorrect `SampBufs` variant {other:?}")),
+        };
+
+        // Sanity check - requested `samp_num` is not too large
+        if self.active_chans().len() * samp_num > samp_buf.len() {
+            return Err(format!(
+                "[fill_with_last_written_vals()] BUG:\n\
+                \tsamp_num * self.active_chans().len() = {} \n\
+                exceeds the total number of samples available in the buffer\n\
+                \tsamp_buf.len() = {}",
+                self.active_chans().len() * samp_num,
+                samp_buf.len()
+            ))
+        };
+
+        for (chan_row_idx, last_val) in self.last_written_vals.values().enumerate() {
+            let chan_slice = &mut samp_buf[chan_row_idx * samp_num .. (chan_row_idx + 1) * samp_num];
+            chan_slice.fill(last_val.unwrap())
+        };
+
+        Ok(())
     }
 }
 // endregion
@@ -539,7 +585,8 @@ pub struct DODev {
     chans: IndexMap<String, DOChan>,
     hw_cfg: HwCfg,
     const_fns_only: bool,
-    compiled_ports: Option<IndexMap<usize, DOPort>>
+    compiled_ports: Option<IndexMap<usize, DOPort>>,
+    last_written_vals: IndexMap<usize, Option<u32>>,
 }
 
 impl DODev {
@@ -551,6 +598,7 @@ impl DODev {
             hw_cfg: HwCfg::dflt(),
             const_fns_only: true,
             compiled_ports: None,
+            last_written_vals: IndexMap::new(),
         }
     }
 
@@ -801,9 +849,11 @@ impl RunControl for DODev {
         self.compiled_stop_pos()
     }
 
-    fn create_task_chans(&self, task: &NiTask) -> Result<(), DAQmxError> {
+    fn create_task_chans(&mut self, task: &NiTask) -> Result<(), DAQmxError> {
+        self.last_written_vals.clear();
         for port_num in self.active_port_nums() {
             task.create_do_chan(&format!("/{}/port{}", self.max_name(), port_num))?;
+            self.last_written_vals.insert(port_num, None);
         }
         Ok(())
     }
@@ -915,7 +965,7 @@ impl RunControl for DODev {
         Ok(())
     }
 
-    fn write_to_hardware(&self, bundle: &mut StreamBundle, bufs: &SampBufs, samp_num: usize) -> Result<usize, DAQmxError> {
+    fn write_to_hardware(&mut self, bundle: &mut StreamBundle, bufs: &SampBufs, samp_num: usize) -> Result<usize, DAQmxError> {
         let ports_buf = match bufs {
             SampBufs::DOPorts(buf) => buf,
             SampBufs::DOLinesPorts((_lines_buf, ports_buf)) => ports_buf,
@@ -926,7 +976,7 @@ impl RunControl for DODev {
         if self.active_port_nums().len() * samp_num > ports_buf.len() {
             return Err(DAQmxError::new(format!(
                 "[write_to_hardware()] BUG:\n\
-                \tsamp_num * self.running_port_nums().len() = {} \n\
+                \tsamp_num * self.active_port_nums().len() = {} \n\
                 exceeds the total number of samples available in the buffer\n\
                 \tsamp_buf.len() = {}",
                 samp_num * self.active_port_nums().len(),
@@ -940,7 +990,44 @@ impl RunControl for DODev {
             samp_num,
             bundle.buf_write_timeout.clone()
         )?;
+
+        // Save the last written value for each port
+        for (port_row_idx, &port_num) in self.active_port_nums().iter().enumerate() {
+            let last_written_val = ports_buf.get((port_row_idx + 1) * samp_num - 1).unwrap().clone();
+            if !self.last_written_vals.contains_key(&port_num) {
+                return Err(DAQmxError::new(format!("[BUG] Key {port_num} was not registered in self.last_written_vals")))
+            }
+            self.last_written_vals.insert(port_num, Some(last_written_val));
+        };
+
         Ok(samps_written)
+    }
+
+    fn fill_with_last_written_vals(&self, bufs: &mut SampBufs, samp_num: usize) -> Result<(), String> {
+        let ports_buf = match bufs {
+            SampBufs::DOPorts(buf) => buf,
+            SampBufs::DOLinesPorts((_lines_buf, ports_buf)) => ports_buf,
+            other => return Err(format!("DODev::write_to_card() received incorrect `SampBufs` variant {other:?}")),
+        };
+
+        // Sanity check - requested `samp_num` is not too large
+        if self.active_port_nums().len() * samp_num > ports_buf.len() {
+            return Err(format!(
+                "[fill_with_last_written_vals()] BUG:\n\
+                \tsamp_num * self.active_port_nums().len() = {} \n\
+                exceeds the total number of samples available in the buffer\n\
+                \tsamp_buf.len() = {}",
+                samp_num * self.active_port_nums().len(),
+                ports_buf.len()
+            ))
+        }
+
+        for (port_row_idx, last_val) in self.last_written_vals.values().enumerate() {
+            let port_slice = &mut ports_buf[port_row_idx * samp_num .. (port_row_idx + 1) * samp_num];
+            port_slice.fill(last_val.unwrap())
+        };
+
+        Ok(())
     }
 }
 // endregion
