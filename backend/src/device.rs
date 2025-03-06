@@ -161,11 +161,7 @@ pub trait RunControl: CommonHwCfg {
     fn alloc_samp_bufs(&self, buf_size: usize) -> SampBufs;
     fn calc_samps(&self, samp_bufs: &mut SampBufs, start_pos: usize, end_pos: usize) -> Result<(), String>;
     fn write_to_hardware(&mut self, bundle: &mut StreamBundle, bufs: &SampBufs, samp_num: usize) -> Result<usize, DAQmxError>;
-    /// Skim-out and save internally the last written value for each channel
-    /// by looking at the sample buffer that was just used by the actual `Self::write_to_hardware` call
-    fn save_last_written_vals(&mut self, bufs: &SampBufs, samp_num: usize) -> Result<(), String>;
-    fn fill_with_last_written_vals(&self, bufs: &mut SampBufs, samp_num: usize) -> Result<(), String>;
-    fn forget_last_written_vals(&mut self);
+    fn fill_with_last_written_vals(&self, task: &NiTask, bufs: &mut SampBufs, samp_num: usize) -> Result<(), String>;
 
     /// Streams an instruction signal to the specified NI-DAQ device.
     ///
@@ -248,7 +244,6 @@ pub trait RunControl: CommonHwCfg {
         // DAQmx Setup
         let task = NiTask::new()?;
         self.create_task_chans(&task)?;
-        self.forget_last_written_vals();
         task.cfg_output_buf(buf_size)?;
         task.disallow_regen()?;
         self.cfg_clk_sync(&task, seq_len)?;
@@ -263,7 +258,7 @@ pub trait RunControl: CommonHwCfg {
         // Calc and write the initial sample chunk into the buffer
         let (start_pos, end_pos) = stream_bundle.counter.tick_next().unwrap();
         self.calc_samps(&mut samp_buf, start_pos, end_pos)?;
-        self.write_samps(&mut stream_bundle, &samp_buf, end_pos - start_pos)?;
+        self.write_to_hardware(&mut stream_bundle, &samp_buf, end_pos - start_pos)?;
 
         Ok((stream_bundle, samp_buf))
     }
@@ -292,7 +287,7 @@ pub trait RunControl: CommonHwCfg {
         // Main streaming loop
         while let Some((start_pos, end_pos)) = stream_bundle.counter.tick_next() {
             self.calc_samps(samp_bufs, start_pos, end_pos)?;
-            self.write_samps(stream_bundle, samp_bufs, end_pos - start_pos)?;
+            self.write_to_hardware(stream_bundle, samp_bufs, end_pos - start_pos)?;
         }
 
         // Now need to wait for the final sample chunk to be generated out by the card before stopping the task.
@@ -308,7 +303,7 @@ pub trait RunControl: CommonHwCfg {
             stream_bundle.ni_task.wait_until_done(stream_bundle.buf_write_timeout.clone())?;
             stream_bundle.ni_task.stop()?;
 
-            self.write_samps(stream_bundle, samp_bufs, end_pos - start_pos)?;
+            self.write_to_hardware(stream_bundle, samp_bufs, end_pos - start_pos)?;
         }
         Ok(())
     }
@@ -389,41 +384,19 @@ pub trait RunControl: CommonHwCfg {
         Ok(())
     }
 
-    fn write_samps(&mut self, bundle: &mut StreamBundle, bufs: &SampBufs, samp_num: usize) -> Result<usize, DAQmxError> {
-        let written_samp_num = self.write_to_hardware(bundle, bufs, samp_num)?;
-        self.save_last_written_vals(bufs, samp_num).map_err(|msg| DAQmxError::new(msg))?;
-        Ok(written_samp_num)
-    }
-
-    /// Utility function. Recommended for use in `Self::save_last_written_vals` implementation
-    fn skim_last_vals<T: Clone>(samp_buf: &[T], chan_num: usize, samp_num: usize) -> Result<Vec<T>, String> {
-        // Sanity check:
-        if chan_num * samp_num > samp_buf.len() {
-            return Err(format!("[skim_last_vals()] expected sample number {} exceeds buffer length {}", chan_num * samp_num, samp_buf.len()))
-        }
-
-        let mut last_vals = Vec::with_capacity(chan_num);
-        for chan_idx in 0..chan_num {
-            let last_samp_idx = (chan_idx + 1) * samp_num - 1;
-            let last_val = samp_buf.get(last_samp_idx).unwrap().clone();
-            last_vals.push(last_val);
-        }
-        Ok(last_vals)
-    }
-
     /// Utility function. Recommended for use in `Self::fill_with_last_written_vals` implementation
-    fn fill_with_last_vals<T: Clone>(target_buf: &mut [T], last_vals: &Vec<T>, chan_num: usize, samp_num: usize) -> Result<(), String> {
+    fn fill_with_vals<T: Clone>(target_buf: &mut [T], chan_vals: &Vec<T>, chan_num: usize, samp_num: usize) -> Result<(), String> {
         // Sanity checks:
-        if chan_num != last_vals.len() {
-            return Err(format!("[fill_with_last_vals()] Number of saved last values {} does not match expected channel number {chan_num}", last_vals.len()))
+        if chan_num != chan_vals.len() {
+            return Err(format!("[fill_with_vals()] Number of channel values {} does not match channel number {chan_num}", chan_vals.len()))
         }
         if chan_num * samp_num > target_buf.len() {
             return Err(format!("[fill_with_last_vals()] requested sample number {} exceeds target buffer length {}", chan_num * samp_num, target_buf.len()))
         }
 
-        for (chan_idx, last_val) in last_vals.iter().enumerate() {
+        for (chan_idx, val) in chan_vals.iter().enumerate() {
             let chan_slice = &mut target_buf[chan_idx * samp_num .. (chan_idx + 1) * samp_num];
-            chan_slice.fill(last_val.clone());
+            chan_slice.fill(val.clone());
         }
         Ok(())
     }
@@ -435,7 +408,6 @@ pub struct AODev {
     samp_rate: f64,
     chans: IndexMap<String, AOChan>,
     hw_cfg: HwCfg,
-    last_written_vals: Option<Vec<f64>>,
 }
 
 impl AODev {
@@ -445,7 +417,6 @@ impl AODev {
             samp_rate,
             chans: IndexMap::new(),
             hw_cfg: HwCfg::dflt(),
-            last_written_vals: None,
         }
     }
 
@@ -581,33 +552,17 @@ impl RunControl for AODev {
         )
     }
 
-    fn save_last_written_vals(&mut self, bufs: &SampBufs, samp_num: usize) -> Result<(), String> {
-        let samp_buf = match bufs {
-            SampBufs::AO(buf) => buf,
-            other => return Err(format!("AODev::save_last_written_vals() received incorrect `SampBufs` variant {other:?}")),
-        };
-
-        let last_vals = <AODev as RunControl>::skim_last_vals(samp_buf, self.active_chans().len(), samp_num)?;
-        self.last_written_vals = Some(last_vals);
-
-        Ok(())
-    }
-
-    fn fill_with_last_written_vals(&self, bufs: &mut SampBufs, samp_num: usize) -> Result<(), String> {
+    fn fill_with_last_written_vals(&self, task: &NiTask, bufs: &mut SampBufs, samp_num: usize) -> Result<(), String> {
         let samp_buf = match bufs {
             SampBufs::AO(buf) => buf,
             other => return Err(format!("AODev::fill_with_last_written_vals() received incorrect `SampBufs` variant {other:?}")),
         };
 
-        if let Some(last_vals) = &self.last_written_vals {
-            <AODev as RunControl>::fill_with_last_vals(&mut samp_buf[..], last_vals, self.active_chans().len(), samp_num)
+        if let Some(last_vals) = task.get_last_written_vals_f64() {
+            <AODev as RunControl>::fill_with_vals(&mut samp_buf[..], &last_vals, self.active_chans().len(), samp_num)
         } else {
-            Err(format!("[fill_with_last_written_vals()] `last_written_vals` field is None"))
+            Err(format!("task.get_last_written_vals_f64() returned None"))
         }
-    }
-
-    fn forget_last_written_vals(&mut self) {
-        self.last_written_vals = None;
     }
 }
 // endregion
@@ -620,7 +575,6 @@ pub struct DODev {
     hw_cfg: HwCfg,
     const_fns_only: bool,
     compiled_ports: Option<IndexMap<usize, DOPort>>,
-    last_written_vals: Option<Vec<u32>>,
 }
 
 impl DODev {
@@ -632,7 +586,6 @@ impl DODev {
             hw_cfg: HwCfg::dflt(),
             const_fns_only: true,
             compiled_ports: None,
-            last_written_vals: None,
         }
     }
 
@@ -885,7 +838,7 @@ impl RunControl for DODev {
 
     fn create_task_chans(&mut self, task: &NiTask) -> Result<(), DAQmxError> {
         for port_num in self.active_port_nums() {
-            task.create_do_chan(&format!("/{}/port{}", self.max_name(), port_num))?;
+            task.create_do_port(&format!("/{}/port{}", self.max_name(), port_num))?;
         }
         Ok(())
     }
@@ -1024,35 +977,18 @@ impl RunControl for DODev {
         )
     }
 
-    fn save_last_written_vals(&mut self, bufs: &SampBufs, samp_num: usize) -> Result<(), String> {
-        let ports_buf = match bufs {
-            SampBufs::DOPorts(buf) => buf,
-            SampBufs::DOLinesPorts((_lines_buf, ports_buf)) => ports_buf,
-            other => return Err(format!("DODev::save_last_written_vals() received incorrect `SampBufs` variant {other:?}"))
-        };
-
-        let last_vals = <DODev as RunControl>::skim_last_vals(&ports_buf[..], self.active_port_nums().len(), samp_num)?;
-        self.last_written_vals = Some(last_vals);
-
-        Ok(())
-    }
-
-    fn fill_with_last_written_vals(&self, bufs: &mut SampBufs, samp_num: usize) -> Result<(), String> {
+    fn fill_with_last_written_vals(&self, task: &NiTask, bufs: &mut SampBufs, samp_num: usize) -> Result<(), String> {
         let ports_buf = match bufs {
             SampBufs::DOPorts(buf) => buf,
             SampBufs::DOLinesPorts((_lines_buf, ports_buf)) => ports_buf,
             other => return Err(format!("DODev::fill_with_last_written_vals() received incorrect `SampBufs` variant {other:?}")),
         };
 
-        if let Some(last_vals) = &self.last_written_vals {
-            <DODev as RunControl>::fill_with_last_vals(&mut ports_buf[..], last_vals, self.active_port_nums().len(), samp_num)
+        if let Some(last_vals) = task.get_last_written_vals_u32() {
+            <DODev as RunControl>::fill_with_vals(&mut ports_buf[..], &last_vals, self.active_port_nums().len(), samp_num)
         } else {
-            Err(format!("[fill_with_last_written_vals()] `last_written_vals` is None"))
+            Err(format!("task.get_last_written_vals_u32() returned None"))
         }
-    }
-
-    fn forget_last_written_vals(&mut self) {
-        self.last_written_vals = None;
     }
 }
 // endregion
