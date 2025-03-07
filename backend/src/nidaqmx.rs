@@ -81,6 +81,7 @@ pub type TaskHandle = *mut libc::c_void;
 
 pub const DAQMX_VAL_RISING: CInt32 = 10280;
 pub const DAQMX_VAL_VOLTS: CInt32 = 10348;
+pub const DAQMX_VAL_CONTSAMPS: CInt32 = 10123;
 pub const DAQMX_VAL_FINITESAMPS: CInt32 = 10178;
 pub const DAQMX_VAL_DONOTALLOWREGEN: CInt32 = 10158;
 pub const DAQMX_VAL_GROUPBYCHANNEL: CBool32 = 0;
@@ -367,7 +368,7 @@ impl NiTask {
         daqmx_call(|| unsafe { DAQmxSetWriteRegenMode(self.handle, DAQMX_VAL_DONOTALLOWREGEN) })
     }
 
-    pub fn cfg_samp_clk_timing(&self, clk_src: &str, samp_rate: f64, seq_len: u64) -> Result<(), DAQmxError> {
+    pub fn cfg_samp_clk_timing(&self, clk_src: &str, samp_rate: f64) -> Result<(), DAQmxError> {
         let src_cstring = std::ffi::CString::new(clk_src)?;
         daqmx_call(|| unsafe {
             DAQmxCfgSampClkTiming(
@@ -375,8 +376,8 @@ impl NiTask {
                 src_cstring.as_ptr(),
                 samp_rate as CFloat64,
                 DAQMX_VAL_RISING,
-                DAQMX_VAL_FINITESAMPS,
-                seq_len as CUint64,
+                DAQMX_VAL_CONTSAMPS,
+                1 as CUint64,
             )
         })
     }

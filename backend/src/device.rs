@@ -31,6 +31,8 @@ use std::collections::BTreeSet;
 use std::iter::zip;
 use std::fmt::{Debug, Formatter};
 use std::sync::mpsc::{Sender, Receiver, SendError, RecvError};
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
 use itertools::Itertools;
@@ -87,6 +89,8 @@ impl ToString for WorkerError {
 pub struct StreamBundle {
     ni_task: NiTask,
     counter: StreamCounter,
+    total_written: u64,
+    buf_size: usize,
     buf_write_timeout: Option<f64>,  // Some(finite_timeout_in_seconds) or None - wait infinitely
 }
 
@@ -160,7 +164,7 @@ pub trait RunControl: CommonHwCfg {
     fn create_task_chans(&mut self, task: &NiTask) -> Result<(), DAQmxError>;
     fn alloc_samp_bufs(&self, buf_size: usize) -> SampBufs;
     fn calc_samps(&self, samp_bufs: &mut SampBufs, start_pos: usize, end_pos: usize) -> Result<(), String>;
-    fn write_to_hardware(&mut self, bundle: &mut StreamBundle, bufs: &SampBufs, samp_num: usize) -> Result<usize, DAQmxError>;
+    fn write_to_hardware(&self, bundle: &mut StreamBundle, bufs: &SampBufs, samp_num: usize) -> Result<usize, DAQmxError>;
     fn fill_with_last_written_vals(&self, task: &NiTask, bufs: &mut SampBufs, samp_num: usize) -> Result<(), String>;
 
     /// Streams an instruction signal to the specified NI-DAQ device.
@@ -244,21 +248,23 @@ pub trait RunControl: CommonHwCfg {
         // DAQmx Setup
         let task = NiTask::new()?;
         self.create_task_chans(&task)?;
-        task.cfg_output_buf(buf_size)?;
+        task.cfg_output_buf((buf_size as f64 * 1.2) as usize)?;  // NI buffer is slightly larger than buf_size to save time for sample calc between reps with soft-stop approach
         task.disallow_regen()?;
-        self.cfg_clk_sync(&task, seq_len)?;
+        self.cfg_clk_sync(&task)?;
 
         // Bundle NiTask, StreamCounter, and buf_write_timeout together for convenience:
         let mut stream_bundle = StreamBundle {
             ni_task: task,
             counter,
+            total_written: 0,
+            buf_size,
             buf_write_timeout,
         };
 
         // Calc and write the initial sample chunk into the buffer
         let (start_pos, end_pos) = stream_bundle.counter.tick_next().unwrap();
         self.calc_samps(&mut samp_buf, start_pos, end_pos)?;
-        self.write_to_hardware(&mut stream_bundle, &samp_buf, end_pos - start_pos)?;
+        stream_bundle.total_written += self.write_to_hardware(&mut stream_bundle, &samp_buf, end_pos - start_pos)? as u64;
 
         Ok((stream_bundle, samp_buf))
     }
@@ -287,23 +293,34 @@ pub trait RunControl: CommonHwCfg {
         // Main streaming loop
         while let Some((start_pos, end_pos)) = stream_bundle.counter.tick_next() {
             self.calc_samps(samp_bufs, start_pos, end_pos)?;
-            self.write_to_hardware(stream_bundle, samp_bufs, end_pos - start_pos)?;
+            stream_bundle.total_written += self.write_to_hardware(stream_bundle, samp_bufs, end_pos - start_pos)? as u64;
         }
 
         // Now need to wait for the final sample chunk to be generated out by the card before stopping the task.
         // In the mean time, we can calculate the initial chunk for the next repetition in the case we are on repeat.
         if !calc_next {
-            stream_bundle.ni_task.wait_until_done(stream_bundle.buf_write_timeout.clone())?;
-            stream_bundle.ni_task.stop()?;
+            // Prepare and write the final dummy buffer for "soft stop"
+            self.fill_with_last_written_vals(&stream_bundle.ni_task, samp_bufs, stream_bundle.buf_size)?;
+            self.write_to_hardware(stream_bundle, samp_bufs, stream_bundle.buf_size)?;
+
+            // Wait until sequence generation is finished
+            Self::wait_until_done_and_stop(stream_bundle)?;
         } else {
+            // Prepare and write the final dummy buffer for "soft stop"
+            self.fill_with_last_written_vals(&stream_bundle.ni_task, samp_bufs, stream_bundle.buf_size)?;
+            self.write_to_hardware(stream_bundle, samp_bufs, stream_bundle.buf_size)?;
+
+            // Calculate the initial chunk for the next run while generation is finishing
             stream_bundle.counter.reset();
             let (start_pos, end_pos) = stream_bundle.counter.tick_next().unwrap();
             self.calc_samps(samp_bufs, start_pos, end_pos)?;
 
-            stream_bundle.ni_task.wait_until_done(stream_bundle.buf_write_timeout.clone())?;
-            stream_bundle.ni_task.stop()?;
+            // Wait until sequence generation is finished
+            Self::wait_until_done_and_stop(stream_bundle)?;
 
-            self.write_to_hardware(stream_bundle, samp_bufs, end_pos - start_pos)?;
+            // Write the initial chunk for the next repetition
+            stream_bundle.total_written = 0;
+            stream_bundle.total_written += self.write_to_hardware(stream_bundle, samp_bufs, end_pos - start_pos)? as u64;
         }
         Ok(())
     }
@@ -328,14 +345,10 @@ pub trait RunControl: CommonHwCfg {
     ///    while secondary devices will configure their tasks to expect the start trigger.
     /// 3. Configures reference clocking based on the device's `ref_clk_line`. Devices that import the reference clock will
     ///    configure it accordingly, while others will export the signal.
-    fn cfg_clk_sync(&self, task: &NiTask, seq_len: usize) -> Result<(), DAQmxError> {
+    fn cfg_clk_sync(&self, task: &NiTask) -> Result<(), DAQmxError> {
         // (1) Sample clock timing mode (includes sample clock source). Additionally, config samp_clk_out
         let samp_clk_src = self.hw_cfg().samp_clk_in.clone().unwrap_or("".to_string());
-        task.cfg_samp_clk_timing(
-            &samp_clk_src,
-            self.samp_rate(),
-            seq_len as u64
-        )?;
+        task.cfg_samp_clk_timing(&samp_clk_src, self.samp_rate())?;
         if let Some(term) = &self.hw_cfg().samp_clk_out {
             task.export_signal(
                 DAQMX_VAL_SAMPLECLOCK,
@@ -382,6 +395,26 @@ pub trait RunControl: CommonHwCfg {
         };
 
         Ok(())
+    }
+
+    /// Wait until generation of all sequence samples is over and play position moves into the dummy buffer
+    /// or timeout elapses. Stops the task before returning in either case.
+    fn wait_until_done_and_stop(stream_bundle: &StreamBundle) -> Result<(), DAQmxError> {
+        let start_instant = Instant::now();
+        loop {
+            let current_play_pos = stream_bundle.ni_task.get_write_total_samp_per_chan_generated()?;
+            if current_play_pos > stream_bundle.total_written {
+                stream_bundle.ni_task.stop()?;
+                return Ok(())
+            }
+            if let Some(timeout) = stream_bundle.buf_write_timeout.clone() {
+                if start_instant.elapsed().as_secs_f64() > timeout {
+                    stream_bundle.ni_task.stop()?;
+                    return Err(DAQmxError::new("Generation did not finish before wait_until_done timeout elapsed. Force-stopped the task".to_string()))
+                }
+            }
+            sleep(Duration::from_millis(5));
+        }
     }
 
     /// Utility function. Recommended for use in `Self::fill_with_last_written_vals` implementation
@@ -526,7 +559,7 @@ impl RunControl for AODev {
         BaseDev::calc_samps(self, &mut samp_buf[..], start_pos, end_pos)
     }
 
-    fn write_to_hardware(&mut self, bundle: &mut StreamBundle, bufs: &SampBufs, samp_num: usize) -> Result<usize, DAQmxError> {
+    fn write_to_hardware(&self, bundle: &mut StreamBundle, bufs: &SampBufs, samp_num: usize) -> Result<usize, DAQmxError> {
         let samp_buf = match bufs {
             SampBufs::AO(buf) => buf,
             other => return Err(DAQmxError::new(format!("AODev::write_to_hardware() received incorrect `SampBufs` variant {other:?}"))),
@@ -950,7 +983,7 @@ impl RunControl for DODev {
         Ok(())
     }
 
-    fn write_to_hardware(&mut self, bundle: &mut StreamBundle, bufs: &SampBufs, samp_num: usize) -> Result<usize, DAQmxError> {
+    fn write_to_hardware(&self, bundle: &mut StreamBundle, bufs: &SampBufs, samp_num: usize) -> Result<usize, DAQmxError> {
         let ports_buf = match bufs {
             SampBufs::DOPorts(buf) => buf,
             SampBufs::DOLinesPorts((_lines_buf, ports_buf)) => ports_buf,
