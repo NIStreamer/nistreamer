@@ -348,7 +348,7 @@ pub trait RunControl: CommonHwCfg {
     fn cfg_clk_sync(&self, task: &NiTask) -> Result<(), DAQmxError> {
         // (1) Sample clock timing mode (includes sample clock source). Additionally, config samp_clk_out
         let samp_clk_src = self.hw_cfg().samp_clk_in.clone().unwrap_or("".to_string());
-        task.cfg_samp_clk_timing(&samp_clk_src, self.samp_rate())?;
+        task.cfg_samp_clk_timing_continuous_samps(&samp_clk_src, self.samp_rate())?;
         if let Some(term) = &self.hw_cfg().samp_clk_out {
             task.export_signal(
                 DAQMX_VAL_SAMPLECLOCK,

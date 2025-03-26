@@ -368,7 +368,7 @@ impl NiTask {
         daqmx_call(|| unsafe { DAQmxSetWriteRegenMode(self.handle, DAQMX_VAL_DONOTALLOWREGEN) })
     }
 
-    pub fn cfg_samp_clk_timing(&self, clk_src: &str, samp_rate: f64) -> Result<(), DAQmxError> {
+    pub fn cfg_samp_clk_timing_continuous_samps(&self, clk_src: &str, samp_rate: f64) -> Result<(), DAQmxError> {
         let src_cstring = std::ffi::CString::new(clk_src)?;
         daqmx_call(|| unsafe {
             DAQmxCfgSampClkTiming(
@@ -378,6 +378,20 @@ impl NiTask {
                 DAQMX_VAL_RISING,
                 DAQMX_VAL_CONTSAMPS,
                 1 as CUint64,
+            )
+        })
+    }
+
+    pub fn cfg_samp_clk_timing_finite_samps(&self, clk_src: &str, samp_rate: f64, samps_per_chan: u64) -> Result<(), DAQmxError> {
+        let src_cstring = std::ffi::CString::new(clk_src)?;
+        daqmx_call(|| unsafe {
+            DAQmxCfgSampClkTiming(
+                self.handle,
+                src_cstring.as_ptr(),
+                samp_rate as CFloat64,
+                DAQMX_VAL_RISING,
+                DAQMX_VAL_FINITESAMPS,
+                samps_per_chan as CUint64,
             )
         })
     }
