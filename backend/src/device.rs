@@ -400,6 +400,7 @@ pub trait RunControl: CommonHwCfg {
     /// Wait until generation of all sequence samples is over and play position moves into the dummy buffer
     /// or timeout elapses. Stops the task before returning in either case.
     fn wait_until_done_and_stop(stream_bundle: &StreamBundle) -> Result<(), DAQmxError> {
+        let timeout = stream_bundle.buf_write_timeout.clone();
         let start_instant = Instant::now();
         loop {
             let current_play_pos = stream_bundle.ni_task.get_write_total_samp_per_chan_generated()?;
@@ -407,11 +408,9 @@ pub trait RunControl: CommonHwCfg {
                 stream_bundle.ni_task.stop()?;
                 return Ok(())
             }
-            if let Some(timeout) = stream_bundle.buf_write_timeout.clone() {
-                if start_instant.elapsed().as_secs_f64() > timeout {
-                    stream_bundle.ni_task.stop()?;
-                    return Err(DAQmxError::new("Generation did not finish before wait_until_done timeout elapsed. Force-stopped the task".to_string()))
-                }
+            if timeout.is_some_and(|timeout| start_instant.elapsed().as_secs_f64() > timeout) {
+                stream_bundle.ni_task.stop()?;
+                return Err(DAQmxError::new("Generation did not finish before wait_until_done timeout elapsed. Force-stopped the task".to_string()))
             }
             sleep(Duration::from_millis(5));
         }
