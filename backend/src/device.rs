@@ -54,6 +54,11 @@ pub enum StartSync {
 pub struct WorkerError {
     msg: String
 }
+impl WorkerError {
+    pub fn new(msg: String) -> Self {
+        Self { msg }
+    }
+}
 impl From<SendError<()>> for WorkerError {
     fn from(_value: SendError<()>) -> Self {
         Self {
@@ -92,6 +97,7 @@ pub struct StreamBundle {
     total_written: u64,
     buf_size: usize,
     buf_write_timeout: Option<f64>,  // Some(finite_timeout_in_seconds) or None - wait infinitely
+    target_rep_dur: f64,
 }
 
 pub enum SampBufs {
@@ -213,14 +219,15 @@ pub trait RunControl: CommonHwCfg {
         mut cmd_recvr: CmdRecvr,
         report_sendr: Sender<()>,
         start_sync: StartSync,
+        target_rep_dur: f64,
     ) -> Result<(), WorkerError> {
-        let (mut stream_bundle, mut samp_bufs) = self.cfg_run_(bufsize_ms)?;
+        let (mut stream_bundle, mut samp_bufs) = self.cfg_run_(bufsize_ms, target_rep_dur)?;
         report_sendr.send(())?;
 
         loop {
             match cmd_recvr.recv()? {
-                WorkerCmd::Stream(calc_next) => {
-                    self.stream_run_(&mut stream_bundle, &mut samp_bufs, &start_sync, calc_next)?;
+                WorkerCmd::Stream(calc_next, nreps) => {
+                    self.stream_run_(&mut stream_bundle, &mut samp_bufs, &start_sync, calc_next, nreps)?;
                     report_sendr.send(())?;
                 },
                 WorkerCmd::Close => {
@@ -230,7 +237,7 @@ pub trait RunControl: CommonHwCfg {
         };
         Ok(())
     }
-    fn cfg_run_(&mut self, bufsize_ms: f64) -> Result<(StreamBundle, SampBufs), WorkerError> {
+    fn cfg_run_(&mut self, bufsize_ms: f64, target_rep_dur: f64) -> Result<(StreamBundle, SampBufs), WorkerError> {
         let buf_dur = bufsize_ms / 1000.0;
         let buf_write_timeout = match &self.hw_cfg().min_bufwrite_timeout {
             Some(min_timeout) => Some(f64::max(10.0*buf_dur, *min_timeout)),
@@ -259,6 +266,7 @@ pub trait RunControl: CommonHwCfg {
             total_written: 0,
             buf_size,
             buf_write_timeout,
+            target_rep_dur
         };
 
         // Calc and write the initial sample chunk into the buffer
@@ -273,7 +281,8 @@ pub trait RunControl: CommonHwCfg {
         stream_bundle: &mut StreamBundle,
         samp_bufs: &mut SampBufs,
         start_sync: &StartSync,
-        calc_next: bool
+        calc_next: bool,
+        nreps: usize,
     ) -> Result<(), WorkerError> {
         // Synchronise task start with other threads
         match start_sync {
@@ -291,10 +300,48 @@ pub trait RunControl: CommonHwCfg {
         };
 
         // Main streaming loop
-        while let Some((start_pos, end_pos)) = stream_bundle.counter.tick_next() {
-            self.calc_samps(samp_bufs, start_pos, end_pos)?;
-            stream_bundle.total_written += self.write_to_hardware(stream_bundle, samp_bufs, end_pos - start_pos)? as u64;
+        for rep_idx in 0..nreps {
+            // Stream the waveform itself
+            while let Some((start_pos, end_pos)) = stream_bundle.counter.tick_next() {
+                self.calc_samps(samp_bufs, start_pos, end_pos)?;
+                stream_bundle.total_written += self.write_to_hardware(stream_bundle, samp_bufs, end_pos - start_pos)? as u64;
+            }
+            stream_bundle.counter.reset();
+
+            // Padding samps to align stop time of this device to all others
+            /* Clock grids of different devices may not align due to incommensurate sampling rates
+               plus some devices may get an extra tick at the end when compiling due to closing edge clipping.
+               As a result, different devices will in general have different single-sequence play durations.
+
+               If not corrected, this difference will systematically add up when running many iterations
+               of in-stream loop resulting in relative drift between pulses on different cards.
+
+               To avoid this, we add padding samples (filled with the last written values - effectively keeping const)
+               to all cards which finish earlier than the "longest" one to make all cards aim at the common
+               "target stop time" for all repetitions.
+
+               (cards will still stop at slightly different times since clock grids generally don't align,
+                but this difference will always be within a single clock period from the common target
+                instead of building up with subsequent repetitions)
+               */
+            let target_stop_time = stream_bundle.target_rep_dur * (rep_idx + 1) as f64;
+            let target_stop_pos = (target_stop_time * self.samp_rate()).round() as u64;
+            // - assertion check
+            if target_stop_pos < stream_bundle.total_written {
+                return Err(WorkerError::new(format!(
+                    "[BUG] In-stream looping, padding: target_stop_pos={target_stop_pos} is below stream_bundle.total_written={}",
+                    stream_bundle.total_written
+                )))
+            }
+            // - padding
+            let padding_ticks = target_stop_pos - stream_bundle.total_written;
+            if padding_ticks > 0 {
+                self.fill_with_last_written_vals(&stream_bundle.ni_task, samp_bufs, padding_ticks as usize)?;
+                stream_bundle.total_written += self.write_to_hardware(stream_bundle, samp_bufs, padding_ticks as usize)? as u64;
+            }
         }
+
+        // "Soft Stop"
 
         // Now need to wait for the final sample chunk to be generated out by the card before stopping the task.
         // In the mean time, we can calculate the initial chunk for the next repetition in the case we are on repeat.

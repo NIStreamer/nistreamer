@@ -334,6 +334,10 @@ impl Streamer {
             }
         }
 
+        // Get the target duration of a single repetition - the longest compiled stop time among all active devs
+        // (get this value before moving the devices to the `running_devs` IndexMap)
+        let target_rep_dur = self.longest_dev_run_time();
+
         // FixMe: this is a temporary dirty hack.
         //  Transfer device objects to a separate IndexMap to be able to wrap them into Arc<Mutex<>> for multithreading
         for dev_name in active_dev_names {
@@ -365,6 +369,7 @@ impl Streamer {
                 cmd_recvr,
                 report_sendr,
                 start_sync.remove(dev_name).unwrap(),
+                target_rep_dur,
             )?;
             self.worker_handles.insert(dev_name.to_string(), handle);
         }
@@ -377,15 +382,16 @@ impl Streamer {
         bufsize_ms: f64,
         cmd_recvr: CmdRecvr,
         report_sendr: Sender<()>,
-        start_sync: StartSync
+        start_sync: StartSync,
+        target_rep_dur: f64,
     ) -> Result<JoinHandle<Result<(), WorkerError>>, String> {
         let spawn_result = thread::Builder::new()
             .name(dev_name)
             .spawn(move || {
                 let mut typed_dev = dev_mutex.lock();
                 match &mut *typed_dev {
-                    NIDev::AO(dev) => dev.worker_loop(bufsize_ms, cmd_recvr, report_sendr, start_sync),
-                    NIDev::DO(dev) => dev.worker_loop(bufsize_ms, cmd_recvr, report_sendr, start_sync),
+                    NIDev::AO(dev) => dev.worker_loop(bufsize_ms, cmd_recvr, report_sendr, start_sync, target_rep_dur),
+                    NIDev::DO(dev) => dev.worker_loop(bufsize_ms, cmd_recvr, report_sendr, start_sync, target_rep_dur),
                 }
             });
         match spawn_result {
@@ -393,8 +399,8 @@ impl Streamer {
             Err(err) => Err(err.to_string())
         }
     }
-    pub fn stream_run_(&mut self, calc_next: bool) -> Result<(), String> {
-        self.worker_cmd_chan.send(WorkerCmd::Stream(calc_next));
+    pub fn stream_run_(&mut self, calc_next: bool, nreps: usize) -> Result<(), String> {
+        self.worker_cmd_chan.send(WorkerCmd::Stream(calc_next, nrep));
         self.collect_worker_reports()
     }
     pub fn close_run_(&mut self) -> Result<(), String> {
