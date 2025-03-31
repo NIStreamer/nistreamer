@@ -79,8 +79,8 @@ impl StreamerWrap {
         self.inner.last_instr_end_time()
     }
 
-    fn total_run_time(&self) -> f64 {
-        self.inner.total_run_time()
+    fn shortest_dev_run_time(&self) -> f64 {
+        self.inner.shortest_dev_run_time()
     }
 
     #[pyo3(signature = (stop_time=None))]
