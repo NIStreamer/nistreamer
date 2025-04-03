@@ -400,7 +400,7 @@ impl Streamer {
         }
     }
     pub fn stream_run_(&mut self, calc_next: bool, nreps: usize) -> Result<(), String> {
-        self.worker_cmd_chan.send(WorkerCmd::Stream(calc_next, nrep));
+        self.worker_cmd_chan.send(WorkerCmd::Stream(calc_next, nreps));
         self.collect_worker_reports()
     }
     pub fn close_run_(&mut self) -> Result<(), String> {
@@ -473,9 +473,7 @@ impl Streamer {
         // Group `cfg_run_()` and `stream_run_()` into one closure for convenient interruption in an error case
         let mut run_ = || -> Result<(), String> {
             self.cfg_run_(bufsize_ms)?;
-            for i in 0..nreps {
-                self.stream_run_(i < (nreps - 1))?;
-            };
+            self.stream_run_(true, nreps)?;
             Ok(())
         };
         // The actual run:

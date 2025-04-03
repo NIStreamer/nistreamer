@@ -119,8 +119,8 @@ impl StreamerWrap {
         }
     }
 
-    pub fn stream_run(&mut self, calc_next: bool) -> PyResult<()> {
-        match self.inner.stream_run_(calc_next) {
+    pub fn stream_run(&mut self, calc_next: bool, nreps: usize) -> PyResult<()> {
+        match self.inner.stream_run_(calc_next, nreps) {
             Ok(()) => Ok(()),
             Err(msg) => Err(PyRuntimeError::new_err(msg)),
         }
