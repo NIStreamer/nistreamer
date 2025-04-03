@@ -139,6 +139,7 @@ use nidaqmx_dummy as nidaqmx;
 
 extern crate indexmap;
 extern crate itertools;
+extern crate parking_lot;
 
 extern crate pyo3;
 use pyo3::prelude::*;

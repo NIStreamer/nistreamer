@@ -63,6 +63,23 @@ use crate::nidaqmx::DAQmxError;
 use crate::worker_cmd_chan::{CmdChan, CmdRecvr, WorkerCmd};
 use itertools::Itertools;
 
+pub enum ManagerCmd {
+    Launch(usize),
+    Close,
+}
+
+pub enum StreamStatus {
+    Ready,
+    Running,
+}
+
+pub struct ManagerBundle {
+    handle: JoinHandle<()>,
+    status: StreamStatus,
+    cmd_sender: Sender<ManagerCmd>,
+    report_recvr: Receiver<Result<(), String>>,
+}
+
 /// An extended version of the [`nicompiler_backend::Experiment`] struct, tailored to provide direct
 /// interfacing capabilities with NI devices.
 ///
@@ -92,6 +109,8 @@ pub struct Streamer {
     worker_cmd_chan: CmdChan,
     worker_report_recvrs: IndexMap<String, Receiver<()>>,
     worker_handles: IndexMap<String, JoinHandle<Result<(), WorkerError>>>,  // FixMe [after Device move to streamer crate]: Maybe store individual device thread handle and report receiver in the Device struct
+    // Stream manager thread
+    manager_bundle: Option<ManagerBundle>,
 }
 
 impl BaseStreamer for Streamer {
@@ -143,6 +162,7 @@ impl Streamer {
             worker_cmd_chan: CmdChan::new(),
             worker_report_recvrs: IndexMap::new(),
             worker_handles: IndexMap::new(),  // FixMe [after Device move to streamer crate]: Maybe store individual device thread handle and report receiver in the Device struct
+            manager_bundle: None,
         }
     }
 
@@ -216,6 +236,141 @@ impl Streamer {
             )?;
         };
         Ok(())
+    }
+
+    pub fn init_stream(&mut self, bufsize_ms: f64) -> Result<(), String> {
+        // (1) Sanity checks
+        if self.manager_bundle.is_some() {
+            return Err("There is already a stream initialized".to_string())
+        }
+
+        if !self.got_instructions() {
+            return Err("Streamer did not get any instructions".to_string())
+        }
+        self.validate_compile_cache()?;
+
+        let active_dev_names: Vec<String> = self.devs
+            .iter()
+            .filter(|(_name, typed_dev)| match typed_dev {
+                NIDev::AO(dev) => dev.got_instructions(),
+                NIDev::DO(dev) => dev.got_instructions(),
+            })
+            .map(|(name, _typed_dev)| name.to_string())
+            .collect();
+        if self.get_starts_last().is_some_and(|starts_last| !active_dev_names.contains(&starts_last)) {
+            return Err(format!(
+                "NIStreamer.starts_last is set to Some({}) but this name is not found in the active device list {active_dev_names:?}. \
+                Either the name is invalid or this device didn't get any instructions and will not run at all",
+                self.get_starts_last().unwrap()
+            ))
+        }
+
+        // (2) Proceed to stream initialization
+
+        // Export 10 MHz reference clock
+        /* We are using static ref_clk export (as opposed to task-based export) to be able to always use
+        the same card as the reference clock source even if this card does not run this time. */
+        self.export_ref_clk_().map_err(|daqmx_err| daqmx_err.to_string())?;
+
+        // Get the target duration of a single repetition - the longest run time among all active devs
+        // (get this value before moving the devices to the `running_devs` IndexMap)
+        let target_rep_dur = self.longest_dev_run_time();
+
+        // FixMe: this is a temporary dirty hack.
+        //  Transfer device objects to a separate IndexMap to be able to wrap them into Arc<Mutex<>> for multithreading
+        for dev_name in active_dev_names {
+            let dev = self.devs.shift_remove(&dev_name).unwrap();
+            self.running_devs.insert(dev_name, Arc::new(Mutex::new(dev)));
+        }
+        // Make a collection of `Arc` clones to be eventually passed into worker threads
+        // let running_devs = self.running_devs.clone();
+        let running_devs: IndexMap<String, Arc<Mutex<NIDev>>> = self.running_devs
+            .iter()
+            .map(|(name, arc_mutex_dev)| (name.clone(), arc_mutex_dev.clone()))
+            .collect();
+
+        // Channels for communication between `main` and `manager` threads
+        let (mngr_cmd_sender, mngr_cmd_recvr) = channel::<ManagerCmd>();
+        let (mngr_report_sender, mngr_report_recvr) = channel::<Result<(), String>>();
+
+        // Spawn manager thread
+        let spawn_result = Self::launch_manager_thread(
+            running_devs,
+            mngr_cmd_recvr,
+            mngr_report_sender,
+            bufsize_ms,
+            target_rep_dur
+        );
+        if spawn_result.is_err() {
+            self.undo_init_changes()?;
+            return Err(spawn_result.unwrap_err())
+        }
+        let manager_handle = spawn_result.unwrap();
+
+        // Wait for the manager to report init status. Handle possible failure
+        match mngr_report_recvr.recv() {
+            Ok(init_res) => match init_res {
+                Ok(()) => { /* manager reported success */ },
+                Err(msg) => {
+                    // Manager reported init failure. By now, manager should have cleared all workers and returned.
+                    // Just join manager thread, undo any changes, and return the error
+                    let _ = manager_handle.join();
+                    self.undo_init_changes()?;
+                    return Err(msg)
+                }
+            },
+            Err(recv_err) => {
+                // Very unexpected case - manager did not report anything and have dropped its' end of the report channel.
+                // It either returned before sending the report or panicked, neither of which is expected.
+                self.undo_init_changes()?;
+                todo!()
+            }
+        };
+
+        self.manager_bundle = Some(ManagerBundle{
+            handle: manager_handle,
+            status: StreamStatus::Ready,
+            cmd_sender: mngr_cmd_sender,
+            report_recvr: mngr_report_recvr
+        });
+
+        Ok(())
+    }
+
+    fn undo_init_changes(&mut self) -> Result<(), String> {
+        self.undo_export_ref_clk_().map_err(|daqmx_err| daqmx_err.to_string())?;
+        self.move_active_devs_back();
+        Ok(())
+    }
+
+    /// Return all used device objects back to the main IndexMap
+    fn move_active_devs_back(&mut self) {
+        for (dev_name, dev_box) in self.running_devs.drain(..) {
+            let dev = Arc::into_inner(dev_box).unwrap().into_inner();
+            self.devs.insert(dev_name, dev);
+        }
+    }
+
+    fn launch_manager_thread(
+        running_devs: IndexMap<String, Arc<Mutex<NIDev>>>,
+        cmd_recvr: Receiver<ManagerCmd>,
+        report_sender: Sender<Result<(), String>>,
+        bufsize_ms: f64,
+        target_rep_dur: f64,
+    ) -> Result<JoinHandle<()>, String> {
+        let spawn_result = thread::Builder::new()
+            .name("Manager".to_string())
+            .spawn(move || {
+                // let mut typed_dev = dev_mutex.lock();
+                // match &mut *typed_dev {
+                //     NIDev::AO(dev) => dev.worker_loop(bufsize_ms, cmd_recvr, report_sendr, start_sync, target_rep_dur),
+                //     NIDev::DO(dev) => dev.worker_loop(bufsize_ms, cmd_recvr, report_sendr, start_sync, target_rep_dur),
+                // }
+            });
+        match spawn_result {
+            Ok(handle) => Ok(handle),
+            Err(err) => Err(err.to_string())
+        }
     }
 
     fn collect_worker_reports(&mut self) -> Result<(), String> {
