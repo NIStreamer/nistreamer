@@ -51,33 +51,31 @@ use std::thread::JoinHandle;
 use std::sync::Arc;
 use std::sync::mpsc::{Sender, Receiver, channel};
 
-use indexmap::IndexMap;
 use parking_lot::Mutex;
+use itertools::Itertools;
+use indexmap::IndexMap;
 
 use base_streamer::device::BaseDev;
 use base_streamer::streamer::{TagBaseDev, BaseStreamer};
 
 use crate::device::{AODev, DODev, NIDev, RunControl, StartSync, WorkerError};
+use crate::manager_thread::{manager_loop, ManagerCmd};
 use crate::nidaqmx;
 use crate::nidaqmx::DAQmxError;
 use crate::worker_cmd_chan::{CmdChan, CmdRecvr, WorkerCmd};
-use itertools::Itertools;
-
-pub enum ManagerCmd {
-    Launch(usize),
-    Close,
-}
 
 pub enum StreamStatus {
     Ready,
     Running,
 }
 
-pub struct ManagerBundle {
-    handle: JoinHandle<()>,
+pub struct StreamControls {
+    manager_handle: JoinHandle<()>,
+    manager_cmd_sender: Sender<ManagerCmd>,
+    manager_report_recvr: Receiver<Result<(), String>>,
+    stop_flag: Arc<Mutex<bool>>,
+    // Internal variable to remember stream state:
     status: StreamStatus,
-    cmd_sender: Sender<ManagerCmd>,
-    report_recvr: Receiver<Result<(), String>>,
 }
 
 /// An extended version of the [`nicompiler_backend::Experiment`] struct, tailored to provide direct
@@ -109,8 +107,8 @@ pub struct Streamer {
     worker_cmd_chan: CmdChan,
     worker_report_recvrs: IndexMap<String, Receiver<()>>,
     worker_handles: IndexMap<String, JoinHandle<Result<(), WorkerError>>>,  // FixMe [after Device move to streamer crate]: Maybe store individual device thread handle and report receiver in the Device struct
-    // Stream manager thread
-    manager_bundle: Option<ManagerBundle>,
+    // Stream manager controls
+    stream_controls: Option<StreamControls>,
 }
 
 impl BaseStreamer for Streamer {
@@ -162,7 +160,7 @@ impl Streamer {
             worker_cmd_chan: CmdChan::new(),
             worker_report_recvrs: IndexMap::new(),
             worker_handles: IndexMap::new(),  // FixMe [after Device move to streamer crate]: Maybe store individual device thread handle and report receiver in the Device struct
-            manager_bundle: None,
+            stream_controls: None,
         }
     }
 
@@ -240,7 +238,7 @@ impl Streamer {
 
     pub fn init_stream(&mut self, bufsize_ms: f64) -> Result<(), String> {
         // (1) Sanity checks
-        if self.manager_bundle.is_some() {
+        if self.stream_controls.is_some() {
             return Err("There is already a stream initialized".to_string())
         }
 
@@ -265,7 +263,7 @@ impl Streamer {
             ))
         }
 
-        // (2) Proceed to stream initialization
+        // (2) Prepare to launch manager thread
 
         // Export 10 MHz reference clock
         /* We are using static ref_clk export (as opposed to task-based export) to be able to always use
@@ -288,29 +286,45 @@ impl Streamer {
             .iter()
             .map(|(name, arc_mutex_dev)| (name.clone(), arc_mutex_dev.clone()))
             .collect();
+        let starts_last_clone = self.get_starts_last();
 
         // Channels for communication between `main` and `manager` threads
-        let (mngr_cmd_sender, mngr_cmd_recvr) = channel::<ManagerCmd>();
-        let (mngr_report_sender, mngr_report_recvr) = channel::<Result<(), String>>();
+        let (cmd_sender, cmd_recvr) = channel::<ManagerCmd>();
+        let (report_sender, report_recvr) = channel::<Result<(), String>>();
+        let stop_flag = Arc::new(Mutex::new(false));
+        let stop_flag_clone = stop_flag.clone();
 
-        // Spawn manager thread
-        let spawn_result = Self::launch_manager_thread(
-            running_devs,
-            mngr_cmd_recvr,
-            mngr_report_sender,
-            bufsize_ms,
-            target_rep_dur
-        );
+        // (3) Launch manager thread
+        let spawn_result = thread::Builder::new()
+            .name("Manager".to_string())
+            .spawn(move || {manager_loop(
+                running_devs,
+                cmd_recvr,
+                report_sender,
+                stop_flag_clone,
+                starts_last_clone,
+                bufsize_ms,
+                target_rep_dur,
+            )});
         if spawn_result.is_err() {
+            // Most likely OS failed to spawn the thread
             self.undo_init_changes()?;
-            return Err(spawn_result.unwrap_err())
+            return Err(spawn_result.unwrap_err().to_string())
         }
         let manager_handle = spawn_result.unwrap();
 
-        // Wait for the manager to report init status. Handle possible failure
-        match mngr_report_recvr.recv() {
+        // (4) Now wait for the manager to launch all the worker threads and all workers to init hardware.
+        // Manager will report the final status back here.
+        /*
+            Manager will collect reports from all workers.
+            If all succeeded, manager reports success back to main and starts waiting for commands.
+            If any worker failed, manager will clean up all remaining workers, submit error report back to main,
+            and finally return. So main thread only has to join the already-returned manager handle.
+        */
+        match report_recvr.recv() {
+            // Manager reported init status
             Ok(init_res) => match init_res {
-                Ok(()) => { /* manager reported success */ },
+                Ok(()) => { /* All workers succeeded, stream is ready! */ },
                 Err(msg) => {
                     // Manager reported init failure. By now, manager should have cleared all workers and returned.
                     // Just join manager thread, undo any changes, and return the error
@@ -319,19 +333,30 @@ impl Streamer {
                     return Err(msg)
                 }
             },
-            Err(recv_err) => {
-                // Very unexpected case - manager did not report anything and have dropped its' end of the report channel.
-                // It either returned before sending the report or panicked, neither of which is expected.
+
+            // Manager has quit before reporting anything
+            Err(_recv_err) => {
+                /* Very unexpected case - manager did not report anything before dropping its' end of the report channel.
+                   It must have quit - by either returning before sending the report or by panicking - neither of which is expected. */
+
                 self.undo_init_changes()?;
-                todo!()
+
+                // Try joining manager thread to retrieve panic message
+                // (manager must have quit by now, so this call should return immediately)
+                return match manager_handle.join() {
+                    Err(err) => Err(format!("Manager has panicked: {:?}", err)),
+                    Ok(()) => Err("Totally unexpected - manager quit before reporting, yet normally returned `()`. There must be some bug".to_string()),
+                };
             }
         };
 
-        self.manager_bundle = Some(ManagerBundle{
-            handle: manager_handle,
+        // (5) Stream was successfully initialized. Save all manager handles and return Ok(())
+        self.stream_controls = Some(StreamControls {
+            manager_handle,
+            manager_cmd_sender: cmd_sender,
+            manager_report_recvr: report_recvr,
+            stop_flag,
             status: StreamStatus::Ready,
-            cmd_sender: mngr_cmd_sender,
-            report_recvr: mngr_report_recvr
         });
 
         Ok(())
@@ -339,38 +364,14 @@ impl Streamer {
 
     fn undo_init_changes(&mut self) -> Result<(), String> {
         self.undo_export_ref_clk_().map_err(|daqmx_err| daqmx_err.to_string())?;
-        self.move_active_devs_back();
-        Ok(())
-    }
 
-    /// Return all used device objects back to the main IndexMap
-    fn move_active_devs_back(&mut self) {
+        // Return all active device objects back to the main IndexMap
         for (dev_name, dev_box) in self.running_devs.drain(..) {
             let dev = Arc::into_inner(dev_box).unwrap().into_inner();
             self.devs.insert(dev_name, dev);
         }
-    }
 
-    fn launch_manager_thread(
-        running_devs: IndexMap<String, Arc<Mutex<NIDev>>>,
-        cmd_recvr: Receiver<ManagerCmd>,
-        report_sender: Sender<Result<(), String>>,
-        bufsize_ms: f64,
-        target_rep_dur: f64,
-    ) -> Result<JoinHandle<()>, String> {
-        let spawn_result = thread::Builder::new()
-            .name("Manager".to_string())
-            .spawn(move || {
-                // let mut typed_dev = dev_mutex.lock();
-                // match &mut *typed_dev {
-                //     NIDev::AO(dev) => dev.worker_loop(bufsize_ms, cmd_recvr, report_sendr, start_sync, target_rep_dur),
-                //     NIDev::DO(dev) => dev.worker_loop(bufsize_ms, cmd_recvr, report_sendr, start_sync, target_rep_dur),
-                // }
-            });
-        match spawn_result {
-            Ok(handle) => Ok(handle),
-            Err(err) => Err(err.to_string())
-        }
+        Ok(())
     }
 
     fn collect_worker_reports(&mut self) -> Result<(), String> {
