@@ -270,10 +270,6 @@ impl Streamer {
         the same card as the reference clock source even if this card does not run this time. */
         self.export_ref_clk_().map_err(|daqmx_err| daqmx_err.to_string())?;
 
-        // Get the target duration of a single repetition - the longest run time among all active devs
-        // (get this value before moving the devices to the `running_devs` IndexMap)
-        let target_rep_dur = self.longest_dev_run_time();
-
         // FixMe: this is a temporary dirty hack.
         //  Transfer device objects to a separate IndexMap to be able to wrap them into Arc<Mutex<>> for multithreading
         for dev_name in active_dev_names {
@@ -304,7 +300,6 @@ impl Streamer {
                 stop_flag_clone,
                 starts_last_clone,
                 bufsize_ms,
-                target_rep_dur,
             )});
         if spawn_result.is_err() {
             // Most likely OS failed to spawn the thread

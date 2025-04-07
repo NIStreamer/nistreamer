@@ -1093,4 +1093,13 @@ impl CommonHwCfg for NIDev {
         }
     }
 }
+
+impl NIDev {
+    pub fn compiled_stop_time(&self) -> f64 {
+        match self {
+            NIDev::AO(dev) => dev.compiled_stop_time(),
+            NIDev::DO(dev) => dev.compiled_stop_time(),
+        }
+    }
+}
 // endregion

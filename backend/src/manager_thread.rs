@@ -18,19 +18,16 @@ pub fn manager_loop(
     devs: IndexMap<String, Arc<Mutex<NIDev>>>,
     cmd_recvr: Receiver<ManagerCmd>,
     report_sender: Sender<Result<(), String>>,
-    stop_flag: Arc<Mutex<bool>>,
+    main_requested_stop: Arc<Mutex<bool>>,
     starts_last: Option<String>,
     bufsize_ms: f64,
-    target_rep_dur: f64,
 ) {
     // Init
-    let mut manager_stub = StreamManager::new_uninit();
-    let init_res = manager_stub.try_init(
+    let init_res = StreamManager::try_init(
         devs,
-        stop_flag,
+        main_requested_stop,
         starts_last,
         bufsize_ms,
-        target_rep_dur
     );
     let mut manager = match init_res {
         Ok(manager) => {
@@ -64,25 +61,19 @@ pub struct StreamManager {
 }
 
 impl StreamManager {
-    pub fn new_uninit() -> Self {
-        Self {
-            worker_handles: IndexMap::new(),
-            worker_cmd_chan: CmdChan::new(),
-            internal_stop_flag: Arc::new(Mutex::new(false)),
-            worker_report_recvrs: IndexMap::new(),
-            main_stop_flag: Arc::new(Mutex::new(false))
-        }
-    }
-
     pub fn try_init(
-        mut self,
         mut devs: IndexMap<String, Arc<Mutex<NIDev>>>,
         main_stop_flag: Arc<Mutex<bool>>,
         starts_last: Option<String>,
         bufsize_ms: f64,
-        target_rep_dur: f64,
     ) -> Result<Self, String> {
-        self.main_stop_flag = main_stop_flag;
+        let mut manager = Self {
+            worker_handles: IndexMap::new(),
+            worker_cmd_chan: CmdChan::new(),
+            internal_stop_flag: Arc::new(Mutex::new(false)),
+            worker_report_recvrs: IndexMap::new(),
+            main_stop_flag
+        };
 
         // - inter-worker start sync channels
         let mut start_sync = HashMap::new();
@@ -112,17 +103,23 @@ impl StreamManager {
             }
         }
 
+        // Target duration of a single repetition - the longest compiled sequence duration among all running devs
+        let target_rep_dur = devs.values()
+            .map(|dev_mutex| dev_mutex.lock().compiled_stop_time())
+            .reduce(|longest_so_far, this| f64::max(longest_so_far, this))
+            .unwrap();
+
         // Prepare a few more inter-thread sync objects and launch worker threads
         let mut worker_err_log = IndexMap::new();
         for (dev_name, dev_container) in devs.drain(..) {
             // - command receiver for this worker
-            let cmd_recvr = self.worker_cmd_chan.new_recvr();
+            let cmd_recvr = manager.worker_cmd_chan.new_recvr();
 
             // - report channel for this worker
             let (report_sendr, report_recvr) = channel::<()>();
-            self.worker_report_recvrs.insert(dev_name.clone(), report_recvr);
+            manager.worker_report_recvrs.insert(dev_name.clone(), report_recvr);
 
-            // - retreive start_sync
+            // - retrieve start_sync
             let worker_start_sync = start_sync.remove(&dev_name).unwrap();
 
             // Launch worker thread
@@ -136,28 +133,28 @@ impl StreamManager {
                     }
                 });
             match spawn_result {
-                Ok(handle) => { self.worker_handles.insert(dev_name.to_string(), handle); },
+                Ok(handle) => { manager.worker_handles.insert(dev_name.to_string(), handle); },
                 Err(err) => {
                     /* OS failed to launch this thread */
                     worker_err_log.insert(dev_name.clone(), err.to_string());
                     // Dispose of report receiver for this failed worker right away
-                    let _ = self.worker_report_recvrs.shift_remove(&dev_name);
+                    let _ = manager.worker_report_recvrs.shift_remove(&dev_name);
                     break
                 },
             };
         }
 
         // Wait for workers to report init completion or failure
-        let overall_worker_report = self.collect_worker_reports();
+        let overall_worker_report = manager.collect_worker_reports();
 
         // Close all remaining workers and return the error if any of the workers has failed
         if !worker_err_log.is_empty() || overall_worker_report.is_err() {
             // At least one worker has failed to launch / init. Command all remaining ones to quit,
             // and join all worker threads, and collect error messages from all failed ones
 
-            self.worker_cmd_chan.send(WorkerCmd::Close);
+            manager.worker_cmd_chan.send(WorkerCmd::Close);
 
-            for (worker_name, worker_handle) in self.worker_handles.drain(..) {
+            for (worker_name, worker_handle) in manager.worker_handles.drain(..) {
                 match worker_handle.join() {
                     Ok(worker_res) => match worker_res {
                         Ok(()) => {},
@@ -174,7 +171,7 @@ impl StreamManager {
             return Err(joint_err_msg)
         };
 
-        Ok(self)
+        Ok(manager)
     }
 
     fn collect_worker_reports(&self) -> Result<(), ()> {
