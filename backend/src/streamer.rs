@@ -70,10 +70,10 @@ pub enum StreamStatus {
 }
 
 pub struct StreamControls {
-    manager_handle: JoinHandle<()>,
+    manager_handle: JoinHandle<Result<(), String>>,
     manager_cmd_sender: Sender<ManagerCmd>,
-    manager_report_recvr: Receiver<Result<(), String>>,
-    stop_flag: Arc<Mutex<bool>>,
+    manager_report_recvr: Receiver<()>,
+    stop_requested: Arc<Mutex<bool>>,
     // Internal variable to remember stream state:
     status: StreamStatus,
 }
@@ -286,9 +286,9 @@ impl Streamer {
 
         // Channels for communication between `main` and `manager` threads
         let (cmd_sender, cmd_recvr) = channel::<ManagerCmd>();
-        let (report_sender, report_recvr) = channel::<Result<(), String>>();
-        let stop_flag = Arc::new(Mutex::new(false));
-        let stop_flag_clone = stop_flag.clone();
+        let (report_sender, report_recvr) = channel::<()>();
+        let stop_requested = Arc::new(Mutex::new(false));
+        let stop_requested_clone = stop_requested.clone();
 
         // (3) Launch manager thread
         let spawn_result = thread::Builder::new()
@@ -297,7 +297,7 @@ impl Streamer {
                 running_devs,
                 cmd_recvr,
                 report_sender,
-                stop_flag_clone,
+                stop_requested_clone,
                 starts_last_clone,
                 bufsize_ms,
             )});
@@ -317,30 +317,20 @@ impl Streamer {
             and finally return. So main thread only has to join the already-returned manager handle.
         */
         match report_recvr.recv() {
-            // Manager reported init status
-            Ok(init_res) => match init_res {
-                Ok(()) => { /* All workers succeeded, stream is ready! */ },
-                Err(msg) => {
-                    // Manager reported init failure. By now, manager should have cleared all workers and returned.
-                    // Just join manager thread, undo any changes, and return the error
-                    let _ = manager_handle.join();
-                    self.undo_init_changes()?;
-                    return Err(msg)
-                }
-            },
-
-            // Manager has quit before reporting anything
+            Ok(()) => { /* Manager reported init completion. All workers succeeded, stream is ready! */ },
             Err(_recv_err) => {
-                /* Very unexpected case - manager did not report anything before dropping its' end of the report channel.
-                   It must have quit - by either returning before sending the report or by panicking - neither of which is expected. */
-
+                /* Manager has quit because some error has occurred.
+                   Manager was responsible for shutting down all the workers and cleaning up before returning.
+                   So just undo init changes and join manager thread to collect the returned error message. */
                 self.undo_init_changes()?;
-
-                // Try joining manager thread to retrieve panic message
-                // (manager must have quit by now, so this call should return immediately)
-                return match manager_handle.join() {
-                    Err(err) => Err(format!("Manager has panicked: {:?}", err)),
-                    Ok(()) => Err("Totally unexpected - manager quit before reporting, yet normally returned `()`. There must be some bug".to_string()),
+                return match manager_handle.join() {  // (manager must have quit by now, so this call should return immediately)
+                    // If manager returned:
+                    Ok(res) => match res {
+                        Err(msg) => Err(msg),
+                        Ok(()) => Err("Very unexpected: manager has quit unexpectedly at init, yet returned Ok result".to_string()),
+                    },
+                    // If manager panicked:
+                    Err(panic_obj) => Err(format!("Manager has panicked: {panic_obj:?}")),
                 };
             }
         };
@@ -350,10 +340,9 @@ impl Streamer {
             manager_handle,
             manager_cmd_sender: cmd_sender,
             manager_report_recvr: report_recvr,
-            stop_flag,
+            stop_requested,
             status: StreamStatus::Ready,
         });
-
         Ok(())
     }
 
@@ -540,10 +529,11 @@ impl Streamer {
             .name(dev_name)
             .spawn(move || {
                 let mut typed_dev = dev_mutex.lock();
-                match &mut *typed_dev {
-                    NIDev::AO(dev) => dev.worker_loop(bufsize_ms, cmd_recvr, report_sendr, start_sync, target_rep_dur),
-                    NIDev::DO(dev) => dev.worker_loop(bufsize_ms, cmd_recvr, report_sendr, start_sync, target_rep_dur),
-                }
+                // match &mut *typed_dev {
+                //     NIDev::AO(dev) => dev.worker_loop(bufsize_ms, cmd_recvr, report_sendr, start_sync, target_rep_dur),
+                //     NIDev::DO(dev) => dev.worker_loop(bufsize_ms, cmd_recvr, report_sendr, start_sync, target_rep_dur),
+                // }
+                Ok(())
             });
         match spawn_result {
             Ok(handle) => Ok(handle),

@@ -30,12 +30,14 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::iter::zip;
 use std::fmt::{Debug, Formatter};
+use std::sync::Arc;
 use std::sync::mpsc::{Sender, Receiver, SendError, RecvError};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
 use itertools::Itertools;
+use parking_lot::Mutex;
 
 use base_streamer::channel::BaseChan;
 use base_streamer::device::BaseDev;
@@ -63,6 +65,13 @@ impl From<SendError<()>> for WorkerError {
     fn from(_value: SendError<()>) -> Self {
         Self {
             msg: "Worker thread encountered SendError".to_string()
+        }
+    }
+}
+impl From<SendError<WorkerReport>> for WorkerError {
+    fn from(value: SendError<WorkerReport>) -> Self {
+        Self {
+            msg: format!("Worker thread encountered SendError when trying to send {:?}", value.to_string())
         }
     }
 }
@@ -142,6 +151,13 @@ pub trait CommonHwCfg {
     fn hw_cfg_mut(&mut self) -> &mut HwCfg;
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum WorkerReport {
+    InitComplete,
+    IterComplete,
+    RunFinished,
+}
+
 /// The `StreamableDevice` trait extends the [`nicompiler_backend::BaseDevice`] trait of [`nicompiler_backend::Device`]
 /// to provide additional functionality for streaming tasks.
 pub trait RunControl: CommonHwCfg {
@@ -217,18 +233,19 @@ pub trait RunControl: CommonHwCfg {
         &mut self,
         bufsize_ms: f64,
         mut cmd_recvr: CmdRecvr,
-        report_sendr: Sender<()>,
+        report_sender: Sender<WorkerReport>,
+        stop_flag: Arc<Mutex<bool>>,
         start_sync: StartSync,
         target_rep_dur: f64,
     ) -> Result<(), WorkerError> {
         let (mut stream_bundle, mut samp_bufs) = self.cfg_run_(bufsize_ms, target_rep_dur)?;
-        report_sendr.send(())?;
+        report_sender.send(WorkerReport::InitComplete)?;
 
         loop {
             match cmd_recvr.recv()? {
                 WorkerCmd::Stream(calc_next, nreps) => {
-                    self.stream_run_(&mut stream_bundle, &mut samp_bufs, &start_sync, calc_next, nreps)?;
-                    report_sendr.send(())?;
+                    self.stream_run_(&mut stream_bundle, &mut samp_bufs, &report_sender, &stop_flag, &start_sync, calc_next, nreps)?;
+                    report_sender.send(WorkerReport::RunFinished)?;
                 },
                 WorkerCmd::Close => {
                     break
@@ -280,6 +297,8 @@ pub trait RunControl: CommonHwCfg {
         &mut self,
         stream_bundle: &mut StreamBundle,
         samp_bufs: &mut SampBufs,
+        report_sender: &Sender<WorkerReport>,
+        stop_flag: &Arc<Mutex<bool>>,
         start_sync: &StartSync,
         calc_next: bool,
         nreps: usize,
@@ -322,8 +341,7 @@ pub trait RunControl: CommonHwCfg {
 
                (cards will still stop at slightly different times since clock grids generally don't align,
                 but this difference will always be within a single clock period from the common target
-                instead of building up with subsequent repetitions)
-               */
+                instead of building up with subsequent repetitions) */
             let target_stop_time = stream_bundle.target_rep_dur * (rep_idx + 1) as f64;
             let target_stop_pos = (target_stop_time * self.samp_rate()).round() as u64;
             // - assertion check
@@ -338,6 +356,13 @@ pub trait RunControl: CommonHwCfg {
             if padding_ticks > 0 {
                 self.fill_with_last_written_vals(&stream_bundle.ni_task, samp_bufs, padding_ticks as usize)?;
                 stream_bundle.total_written += self.write_to_hardware(stream_bundle, samp_bufs, padding_ticks as usize)? as u64;
+            }
+
+            // Report iteration completion back to the manager
+            report_sender.send(WorkerReport::IterComplete)?;
+            // Check if manager raised stop flag
+            if *stop_flag.lock() {
+                break
             }
         }
 
