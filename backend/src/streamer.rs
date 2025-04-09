@@ -49,7 +49,8 @@ use std::collections::HashMap;
 use std::thread;
 use std::thread::JoinHandle;
 use std::sync::Arc;
-use std::sync::mpsc::{Sender, Receiver, channel};
+use std::sync::mpsc::{Sender, Receiver, channel, RecvTimeoutError};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use itertools::Itertools;
@@ -64,6 +65,7 @@ use crate::nidaqmx;
 use crate::nidaqmx::DAQmxError;
 use crate::worker_cmd_chan::{CmdChan, CmdRecvr, WorkerCmd};
 
+#[derive(Copy, Clone, Debug)]
 pub enum StreamStatus {
     Ready,
     Running,
@@ -76,6 +78,11 @@ pub struct StreamControls {
     stop_requested: Arc<Mutex<bool>>,
     // Internal variable to remember stream state:
     status: StreamStatus,
+}
+
+pub enum WaitUntilFinishedErr {
+    Timeout,
+    Failed(String),
 }
 
 /// An extended version of the [`nicompiler_backend::Experiment`] struct, tailored to provide direct
@@ -303,39 +310,12 @@ impl Streamer {
             )});
         if spawn_result.is_err() {
             // Most likely OS failed to spawn the thread
-            self.undo_init_changes()?;
+            self.undo_init_changes()?;  // ToDo: how should this error be handled?
             return Err(spawn_result.unwrap_err().to_string())
         }
         let manager_handle = spawn_result.unwrap();
 
-        // (4) Now wait for the manager to launch all the worker threads and all workers to init hardware.
-        // Manager will report the final status back here.
-        /*
-            Manager will collect reports from all workers.
-            If all succeeded, manager reports success back to main and starts waiting for commands.
-            If any worker failed, manager will clean up all remaining workers, submit error report back to main,
-            and finally return. So main thread only has to join the already-returned manager handle.
-        */
-        match report_recvr.recv() {
-            Ok(()) => { /* Manager reported init completion. All workers succeeded, stream is ready! */ },
-            Err(_recv_err) => {
-                /* Manager has quit because some error has occurred.
-                   Manager was responsible for shutting down all the workers and cleaning up before returning.
-                   So just undo init changes and join manager thread to collect the returned error message. */
-                self.undo_init_changes()?;
-                return match manager_handle.join() {  // (manager must have quit by now, so this call should return immediately)
-                    // If manager returned:
-                    Ok(res) => match res {
-                        Err(msg) => Err(msg),
-                        Ok(()) => Err("Very unexpected: manager has quit unexpectedly at init, yet returned Ok result".to_string()),
-                    },
-                    // If manager panicked:
-                    Err(panic_obj) => Err(format!("Manager has panicked: {panic_obj:?}")),
-                };
-            }
-        };
-
-        // (5) Stream was successfully initialized. Save all manager handles and return Ok(())
+        // (4) Save all stream controls
         self.stream_controls = Some(StreamControls {
             manager_handle,
             manager_cmd_sender: cmd_sender,
@@ -343,7 +323,94 @@ impl Streamer {
             stop_requested,
             status: StreamStatus::Ready,
         });
-        Ok(())
+
+        // (5) Now wait for the manager to launch all the worker threads and all workers to init hardware.
+        // Manager will report the final status back here.
+        /*
+            Manager will collect reports from all workers.
+            If all succeeded, manager reports success back to main and starts waiting for commands.
+            If any worker failed, manager will clean up all remaining workers, submit error report back to main,
+            and finally return. So main thread only has to join the already-returned manager handle.
+        */
+        let recv_res = self.stream_controls.as_ref().unwrap().manager_report_recvr.recv();
+        if recv_res.is_ok() {
+            /* Manager reported init completion. All workers succeeded, stream is ready! */
+            Ok(())
+        } else {
+            /* Manager has quit because some errors occurred.
+               Manager was responsible for shutting down all the workers and cleaning up before returning.
+               So just join manager thread to collect the returned error message and undo init changes. */
+            let err_msg = self.collect_err_info_undo_init_changes();
+            Err(err_msg)
+        }
+    }
+
+    pub fn launch_run(&mut self, nreps: usize) -> Result<(), String> {
+        // (1) Status checks
+        if self.stream_controls.is_none() {
+            return Err("Stream is not initialized".to_string())
+        }
+        let stream_controls = self.stream_controls.as_mut().unwrap();
+        match stream_controls.status {
+            StreamStatus::Ready => { /* good to go */ },
+            StreamStatus::Running => return Err("Stream is already running".to_string()),
+        }
+
+        // (2) Command manager to launch the run
+        *stream_controls.stop_requested.lock() = false;
+        let send_res = stream_controls.manager_cmd_sender.send(ManagerCmd::Launch(nreps));
+
+        // (3) Handle the case the manager has quit already and return
+        if send_res.is_ok() {
+            stream_controls.status = StreamStatus::Running;
+            Ok(())
+        } else {
+            // Manager thread dropped its' side of the command channel - it must have quit due to an error.
+            let err_msg = self.collect_err_info_undo_init_changes();
+            Err(err_msg)
+        }
+    }
+
+    pub fn request_stop(&self) -> Result<(), String> {
+        if self.stream_controls.is_none() {
+            return Err("Stream is not initialized".to_string())
+        }
+        let stream_controls = self.stream_controls.as_ref().unwrap();
+        match stream_controls.status {
+            StreamStatus::Running => {
+                *stream_controls.stop_requested.lock() = true;
+                Ok(())
+            },
+            StreamStatus::Ready => Ok(()),
+        }
+    }
+
+    pub fn wait_until_finished(&mut self, timeout: Duration) -> Result<(), WaitUntilFinishedErr> {
+        if self.stream_controls.is_none() {
+            return Err(WaitUntilFinishedErr::Failed("Stream is not initialized".to_string()))
+        };
+        let stream_controls = self.stream_controls.as_mut().unwrap();
+        match stream_controls.status {
+            StreamStatus::Running => { /* Should wait. Moving further in logic */ },
+            StreamStatus::Ready => return Ok(()),  // Stream is idle, return immediately.
+        }
+
+        match stream_controls.manager_report_recvr.recv_timeout(timeout) {
+            Ok(()) => Ok(()),
+            Err(recv_err) => match recv_err {
+                RecvTimeoutError::Timeout => Err(WaitUntilFinishedErr::Timeout),
+                RecvTimeoutError::Disconnected => {
+                    // Manager thread dropped its' side of the command channel - it must have quit due to an error.
+                    // Error info should be contained in the returned value - use join handle to retrieve it.
+                    let err_msg = self.collect_err_info_undo_init_changes();
+                    Err(WaitUntilFinishedErr::Failed(err_msg))
+                }
+            }
+        }
+    }
+
+    pub fn close_stream(&mut self) -> Result<(), String> {
+        todo!()
     }
 
     fn undo_init_changes(&mut self) -> Result<(), String> {
@@ -356,6 +423,26 @@ impl Streamer {
         }
 
         Ok(())
+    }
+
+    /// This method should be used when stream manager has quit due to some errors occurring.
+    ///
+    /// Manager was responsible for shutting down all the workers and cleaning up before returning.
+    /// So just undo init changes and join manager thread to collect the returned error message.
+    ///
+    /// **Warning**: this method will block until manager thread joins.
+    /// Only call it if you are sure the manager has stopped already or will stop later.
+    fn collect_err_info_undo_init_changes(&mut self) -> String {
+        let controls_bundle = self.stream_controls.take().unwrap();  // also sets `self.stream_controls` to `None`
+        let err_msg = match controls_bundle.manager_handle.join() {
+            Ok(manager_res) => match manager_res {
+                Err(err_info) => err_info,
+                Ok(()) => "[BUG] Manager has quit unexpectedly, yet returned Ok".to_string(),
+            },
+            Err(panic_info) => format!("Manager has panicked: {panic_info:?}")
+        };
+        let _ = self.undo_init_changes();  // ToDo: how should this error be handled?
+        err_msg
     }
 
     fn collect_worker_reports(&mut self) -> Result<(), String> {
