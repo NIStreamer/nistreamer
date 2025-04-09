@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::thread;
 use std::thread::JoinHandle;
 use std::sync::{Arc};
-use std::sync::mpsc::{channel, Sender, Receiver};
+use std::sync::mpsc::{channel, Sender, Receiver, SendError, RecvError};
 use parking_lot::Mutex;
 use indexmap::IndexMap;
 
@@ -12,6 +12,40 @@ use crate::worker_cmd_chan::{CmdChan, WorkerCmd};
 pub enum ManagerCmd {
     Launch(usize),
     Close,
+}
+
+pub struct ManagerErr {
+    msg: String
+}
+impl ManagerErr {
+    pub fn new(msg: String) -> Self {
+        Self { msg }
+    }
+}
+impl From<SendError<()>> for ManagerErr {
+    fn from(value: SendError<()>) -> Self {
+        Self::new(format!("Manager thread encountered SendError: {}", value.to_string()))
+    }
+}
+impl From<RecvError> for ManagerErr {
+    fn from(value: RecvError) -> Self {
+        Self::new(format!("Manager thread encountered RecvError: {}", value.to_string()))
+    }
+}
+impl From<std::io::Error> for ManagerErr {
+    fn from(value: std::io::Error) -> Self {
+        Self::new(value.to_string())
+    }
+}
+impl From<String> for ManagerErr {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+impl ToString for ManagerErr {
+    fn to_string(&self) -> String {
+        self.msg.clone()
+    }
 }
 
 pub fn manager_loop(
@@ -27,23 +61,22 @@ pub fn manager_loop(
 
     // Convenience closure to simplify error handling
     // - using `?` operator will return immediately if an error occurs at any step.
-    let catch_closure = || -> Result<(), String> {
+    let catch_closure = || -> Result<(), ManagerErr> {
         manager.try_init(devs, starts_last, bufsize_ms)?;
-        report_sender.send(()).map_err(|err| err.to_string())?;
+        report_sender.send(())?;
 
         loop {
-            match cmd_recvr.recv().map_err(|err| err.to_string())? {
-                ManagerCmd::Launch(nreps) => { /* ToDo */ }
+            match cmd_recvr.recv()? {
+                ManagerCmd::Launch(nreps) => { manager.run(nreps)? }
                 ManagerCmd::Close => {
                     break
                 }
             }
         }
-
         Ok(())
     };
 
-    // The actual manager loop logic:
+    // Run the actual manager loop logic:
     let closure_result = catch_closure();
 
     // Shut down all workers (no matter what main logic result was)
@@ -54,8 +87,8 @@ pub fn manager_loop(
         Ok(())
     } else {
         let mut joint_err_msg = String::new();
-        if let Err(msg) = closure_result {
-            joint_err_msg.push_str(&format!("\nManager error report: \n{msg}"))
+        if let Err(err) = closure_result {
+            joint_err_msg.push_str(&format!("\nManager error report: \n{}", err.to_string()))
         }
         if let Err(msg) = worker_results {
             joint_err_msg.push_str(&format!("\nWorker error reports: \n{msg}"))
@@ -88,7 +121,7 @@ impl StreamManager {
         mut devs: IndexMap<String, Arc<Mutex<NIDev>>>,
         starts_last: Option<String>,
         bufsize_ms: f64,
-    ) -> Result<(), String> {
+    ) -> Result<(), ManagerErr> {
         // - inter-worker start sync channels
         let mut start_sync = HashMap::new();
         if let Some(primary_dev_name) = starts_last {
@@ -137,7 +170,7 @@ impl StreamManager {
 
             // Launch worker thread
             let stop_flag_clone = self.stop_flag.clone();
-            let spawn_result = thread::Builder::new()
+            let handle = thread::Builder::new()
                 .name(dev_name.clone())
                 .spawn(move || {
                     let mut typed_dev = dev_container.lock();
@@ -145,25 +178,70 @@ impl StreamManager {
                         NIDev::AO(dev) => dev.worker_loop(bufsize_ms, cmd_recvr, report_sender, stop_flag_clone, worker_start_sync, target_rep_dur),
                         NIDev::DO(dev) => dev.worker_loop(bufsize_ms, cmd_recvr, report_sender, stop_flag_clone, worker_start_sync, target_rep_dur),
                     }
-                });
-            match spawn_result {
-                Ok(handle) => { self.worker_handles.insert(dev_name.to_string(), handle); },
-                Err(err) => {
-                    /* OS failed to launch this thread */
-                    return Err(err.to_string())
-                },
-            };
+                })?;
+            self.worker_handles.insert(dev_name.to_string(), handle);
         }
 
         // Wait for all workers to report init completion.
         // If any worker had an error/panic, it will be visible as Err on trying to receive the report.
         for (name, report_recvr) in self.worker_report_recvrs.iter() {
-            match report_recvr.recv().map_err(|recv_err| recv_err.to_string())? {
-                WorkerReport::InitComplete => { },
-                other_unexpected => return Err(format!("[BUG] Expected to receive `WorkerReport::InitComplete` but worker {name} reported {other_unexpected:?}"))
+            match report_recvr.recv()? {
+                WorkerReport::InitComplete => { /* worker reported successful init completion */ },
+                other_unexpected => return Err(ManagerErr::new(format!("[BUG] Expected to receive `WorkerReport::InitComplete` but worker {name} reported {other_unexpected:?}")))
             }
         };
+        Ok(())
+    }
 
+    pub fn run(&self, nreps: usize) -> Result<(), ManagerErr> {
+        // (1) Command all workers to start running
+        *self.stop_flag.lock() = false;
+        self.worker_cmd_chan.send(WorkerCmd::Run(true, nreps));
+        let mut stopped_by_request = false;
+
+        // (2) Keep checking on all workers throughout the run + react to stop request from `main` thread
+        /* Each worker should report iteration completion. This is done to catch worker failures at runtime which will show up as `RecvErr` when trying to `recv()` the report. */
+        for rep_idx in 0..nreps {
+            for (name, report_recvr) in self.worker_report_recvrs.iter() {
+                match report_recvr.recv().map_err(|_| format!("[Repetition {rep_idx}] worker {name} failed"))? {
+                    WorkerReport::IterComplete => { /* Worker reported iteration completion as expected */ },
+                    other_unexpected => return Err(ManagerErr::new(format!("[BUG] Expected to receive `WorkerReport::IterComplete` but worker {name} reported {other_unexpected:?}")))
+                }
+            }
+            // Check if stop was requested by `main` thread
+            if *self.main_requested_stop.lock() {
+                *self.stop_flag.lock() = true;
+                stopped_by_request = true;
+                break
+            }
+        }
+
+        // (3) Wait for every worker to report that it has completed "soft stop" and finished running.
+        // Any worker failing will show up as `RecvErr` when trying to `recv()` the report.
+        /* Note:
+            If run was interrupted by `main_requested_stop` there is an uncertainty in when each worker notices that `stop_flag` was raised.
+            If some worker was "ahead", it might have checked for `stop_flag` and started another repetition before the flag was raised.
+            As a result, different workers may complete different number of repetitions before stopping.
+            This makes it necessary to have distinct variants `IterComplete` and `RunFinished` of `WorkerReport`
+            and we need to keep "swallowing" `IterComplete`s until finally receiving `RunFinished`
+        */
+        for (name, report_recvr) in self.worker_report_recvrs.iter() {
+            loop {
+                match report_recvr.recv().map_err(|_| format!("[Collecting RunFinished reports] Worker {name} failed"))? {
+                    WorkerReport::RunFinished => { break /* Worker reported completion as expected */ },
+                    WorkerReport::IterComplete => {
+                        if stopped_by_request {
+                            // "Swallow" this extra `IterComplete` and continue waiting for `RunFinished`
+                            continue
+                        } else {
+                            // This is unexpected - run was not stopped by external request, so every worker was expected to report `IterComplete` precisely `nreps` times
+                            return Err(ManagerErr::new(format!("[BUG] worker {name} reported an unexpected extra `IterComplete`")))
+                        }
+                    },
+                    other_unexpected => return Err(ManagerErr::new(format!("[BUG] Expected to receive `WorkerReport::IterComplete` but worker {name} reported {other_unexpected:?}")))
+                }
+            }
+        }
         Ok(())
     }
 

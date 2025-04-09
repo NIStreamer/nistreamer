@@ -243,7 +243,7 @@ pub trait RunControl: CommonHwCfg {
 
         loop {
             match cmd_recvr.recv()? {
-                WorkerCmd::Stream(calc_next, nreps) => {
+                WorkerCmd::Run(calc_next, nreps) => {
                     self.stream_run_(&mut stream_bundle, &mut samp_bufs, &report_sender, &stop_flag, &start_sync, calc_next, nreps)?;
                     report_sender.send(WorkerReport::RunFinished)?;
                 },

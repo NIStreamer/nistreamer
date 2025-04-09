@@ -3,7 +3,7 @@ use parking_lot::{Condvar, Mutex};
 
 #[derive(Clone, Copy)]
 pub enum WorkerCmd {
-    Stream(bool, usize),  // calc_next: bool - calc init buffer for the next run, nreps: usize - number of in-loop repetitions
+    Run(bool, usize),  // calc_next: bool - calc init buffer for the next run, nreps: usize - number of in-loop repetitions
     Close,
 }
 

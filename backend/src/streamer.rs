@@ -59,7 +59,7 @@ use base_streamer::device::BaseDev;
 use base_streamer::streamer::{TagBaseDev, BaseStreamer};
 
 use crate::device::{AODev, DODev, NIDev, RunControl, StartSync, WorkerError};
-use crate::manager_thread::{manager_loop, ManagerCmd};
+use crate::manager_thread::{manager_loop, ManagerCmd, ManagerErr};
 use crate::nidaqmx;
 use crate::nidaqmx::DAQmxError;
 use crate::worker_cmd_chan::{CmdChan, CmdRecvr, WorkerCmd};
@@ -541,7 +541,7 @@ impl Streamer {
         }
     }
     pub fn stream_run_(&mut self, calc_next: bool, nreps: usize) -> Result<(), String> {
-        self.worker_cmd_chan.send(WorkerCmd::Stream(calc_next, nreps));
+        self.worker_cmd_chan.send(WorkerCmd::Run(calc_next, nreps));
         self.collect_worker_reports()
     }
     pub fn close_run_(&mut self) -> Result<(), String> {
