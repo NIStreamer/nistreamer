@@ -310,7 +310,7 @@ impl Streamer {
             )});
         if spawn_result.is_err() {
             // Most likely OS failed to spawn the thread
-            self.undo_init_changes()?;  // ToDo: how should this error be handled?
+            self.undo_init_changes();
             return Err(spawn_result.unwrap_err().to_string())
         }
         let manager_handle = spawn_result.unwrap();
@@ -410,19 +410,37 @@ impl Streamer {
     }
 
     pub fn close_stream(&mut self) -> Result<(), String> {
-        todo!()
+        if self.stream_controls.is_none() {
+            Ok(())
+        } else {
+            let controls = self.stream_controls.take().unwrap();  // also sets `self.stream_controls` to `None`
+            // Command `manager` to stop any run loop and return no matter what state it was in originally
+            *controls.stop_requested.lock() = true;
+            let _ = controls.manager_cmd_sender.send(ManagerCmd::Close);
+            // After these commands `manager` thread should eventually join
+            let collected_res = match controls.manager_handle.join() {
+                Ok(manager_res) => manager_res,
+                Err(panic_info) => Err(format!("Manager has panicked: {panic_info:?}")),
+            };
+            self.undo_init_changes();
+            collected_res
+        }
     }
 
-    fn undo_init_changes(&mut self) -> Result<(), String> {
-        self.undo_export_ref_clk_().map_err(|daqmx_err| daqmx_err.to_string())?;
+    fn undo_init_changes(&mut self) {
+        // Undo 10 MHz reference export
+        /* This method is meant to be called after `Self::export_ref_clk_()` was called and succeeded.
+           If exporting clock had no errors, `dev_name` and `term_name` should be correct
+           and we do not expect this call to fail. */
+        self.undo_export_ref_clk_().unwrap();
 
         // Return all active device objects back to the main IndexMap
+        /* This method is meant to be called after `manager` thread was joined so all workers
+           must have returned and dropped their clones of `Arc<Mutex<dev>>` earlier. */
         for (dev_name, dev_box) in self.running_devs.drain(..) {
             let dev = Arc::into_inner(dev_box).unwrap().into_inner();
             self.devs.insert(dev_name, dev);
-        }
-
-        Ok(())
+        };
     }
 
     /// This method should be used when stream manager has quit due to some errors occurring.
@@ -441,7 +459,7 @@ impl Streamer {
             },
             Err(panic_info) => format!("Manager has panicked: {panic_info:?}")
         };
-        let _ = self.undo_init_changes();  // ToDo: how should this error be handled?
+        self.undo_init_changes();
         err_msg
     }
 

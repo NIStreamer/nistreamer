@@ -178,7 +178,7 @@ extern "C" {
     fn DAQmxGetWriteTotalSampPerChanGenerated(handle: TaskHandle, data: *mut CUint64) -> CInt32;
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DAQmxError {
     msg: String
 }

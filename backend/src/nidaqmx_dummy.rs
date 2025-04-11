@@ -77,7 +77,7 @@ type CInt32 = libc::c_int;
 pub const DAQMX_VAL_STARTTRIGGER: CInt32 = 12491;
 pub const DAQMX_VAL_SAMPLECLOCK: CInt32 = 12487;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DAQmxError {
     msg: String
 }
