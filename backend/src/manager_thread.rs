@@ -54,7 +54,7 @@ pub fn manager_loop(
     report_sender: Sender<()>,
     main_requested_stop: Arc<Mutex<bool>>,
     starts_last: Option<String>,
-    bufsize_ms: f64,
+    chunksize_ms: f64,
 ) -> Result<(), String> {
     // Init
     let mut manager = StreamManager::new_uninit(main_requested_stop);
@@ -62,7 +62,7 @@ pub fn manager_loop(
     // Convenience closure to simplify error handling
     // - using `?` operator will return immediately if an error occurs at any step.
     let catch_closure = || -> Result<(), ManagerErr> {
-        manager.try_init(devs, starts_last, bufsize_ms)?;
+        manager.try_init(devs, starts_last, chunksize_ms)?;
         report_sender.send(())?;
 
         loop {
@@ -120,9 +120,9 @@ impl StreamManager {
         &mut self,
         mut devs: IndexMap<String, Arc<Mutex<NIDev>>>,
         starts_last: Option<String>,
-        bufsize_ms: f64,
+        chunksize_ms: f64,
     ) -> Result<(), ManagerErr> {
-        // - inter-worker start sync channels
+        // Inter-worker start sync channels
         let mut start_sync = HashMap::new();
         if let Some(primary_dev_name) = starts_last {
             // Create and pack sender-receiver pairs
@@ -173,19 +173,17 @@ impl StreamManager {
             let handle = thread::Builder::new()
                 .name(dev_name.clone())
                 .spawn(move || {
-                    let mut typed_dev = dev_container.lock();
-                    match &mut *typed_dev {
-                        NIDev::AO(dev) => dev.worker_loop(bufsize_ms, cmd_recvr, report_sender, stop_flag_clone, worker_start_sync, target_rep_dur),
-                        NIDev::DO(dev) => dev.worker_loop(bufsize_ms, cmd_recvr, report_sender, stop_flag_clone, worker_start_sync, target_rep_dur),
-                    }
+                    dev_container
+                        .lock()
+                        .worker_loop(chunksize_ms, cmd_recvr, report_sender, stop_flag_clone, worker_start_sync, target_rep_dur)
                 })?;
-            self.worker_handles.insert(dev_name.to_string(), handle);
+            self.worker_handles.insert(dev_name, handle);
         }
 
         // Wait for all workers to report init completion.
         // If any worker had an error/panic, it will be visible as Err on trying to receive the report.
         for (name, report_recvr) in self.worker_report_recvrs.iter() {
-            match report_recvr.recv()? {
+            match report_recvr.recv().map_err(|_| format!("Worker {name} has quit"))? {
                 WorkerReport::InitComplete => { /* worker reported successful init completion */ },
                 other_unexpected => return Err(ManagerErr::new(format!("[BUG] Expected to receive `WorkerReport::InitComplete` but worker {name} reported {other_unexpected:?}")))
             }

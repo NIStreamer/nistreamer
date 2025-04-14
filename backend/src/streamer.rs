@@ -108,6 +108,7 @@ pub struct Streamer {
     devs: IndexMap<String, NIDev>,
     running_devs: IndexMap<String, Arc<Mutex<NIDev>>>,  // FixMe: this is a temporary dirty hack. Transfer device objects back to the main map (they were transferred out to be able to wrap them into Arc<Mutex<>> for multithreading)
     // Streamer-wide settings
+    chunksize_ms: f64,
     ref_clk_provider: Option<(String, String)>,  // Some((dev_name, terminal_name)) or None
     starts_last: Option<String>,  // Some(dev_name) or None
     // Worker thread communication objects
@@ -161,6 +162,7 @@ impl Streamer {
             devs: IndexMap::new(),
             running_devs: IndexMap::new(),  // FixMe: this is a temporary dirty hack. Transfer device objects back to the main map (they were transferred out to be able to wrap them into Arc<Mutex<>> for multithreading)
             // Streamer-wide settings
+            chunksize_ms: 150.0,
             ref_clk_provider: None,  // Some((dev_name, terminal_name))
             starts_last: None,  // Some(dev_name)
             // Worker thread communication objects
@@ -209,6 +211,17 @@ impl Streamer {
         }
     }
 
+    pub fn get_chunksize_ms(&self) -> f64 {
+        self.chunksize_ms.clone()
+    }
+    pub fn set_chunksize_ms(&mut self, val: f64) -> Result<(), String> {
+        if val < 0.0 {
+            return Err(format!("Negative chunksize_ms value provided: {val}"))
+        }
+        self.chunksize_ms = val;
+        Ok(())
+    }
+
     pub fn get_starts_last(&self) -> Option<String> {
         self.starts_last.clone()
     }
@@ -243,7 +256,7 @@ impl Streamer {
         Ok(())
     }
 
-    pub fn init_stream(&mut self, bufsize_ms: f64) -> Result<(), String> {
+    pub fn init_stream(&mut self) -> Result<(), String> {
         // (1) Sanity checks
         if self.stream_controls.is_some() {
             return Err("There is already a stream initialized".to_string())
@@ -254,14 +267,7 @@ impl Streamer {
         }
         self.validate_compile_cache()?;
 
-        let active_dev_names: Vec<String> = self.devs
-            .iter()
-            .filter(|(_name, typed_dev)| match typed_dev {
-                NIDev::AO(dev) => dev.got_instructions(),
-                NIDev::DO(dev) => dev.got_instructions(),
-            })
-            .map(|(name, _typed_dev)| name.to_string())
-            .collect();
+        let active_dev_names = self.active_dev_names();
         if self.get_starts_last().is_some_and(|starts_last| !active_dev_names.contains(&starts_last)) {
             return Err(format!(
                 "NIStreamer.starts_last is set to Some({}) but this name is not found in the active device list {active_dev_names:?}. \
@@ -277,15 +283,13 @@ impl Streamer {
         the same card as the reference clock source even if this card does not run this time. */
         self.export_ref_clk_().map_err(|daqmx_err| daqmx_err.to_string())?;
 
-        // FixMe: this is a temporary dirty hack.
-        //  Transfer device objects to a separate IndexMap to be able to wrap them into Arc<Mutex<>> for multithreading
+        // Transfer device objects to a separate IndexMap to wrap them into `Arc<Mutex<>>` for sharing with worker threads  // FixMe: this is a dirty hack.
         for dev_name in active_dev_names {
             let dev = self.devs.shift_remove(&dev_name).unwrap();
             self.running_devs.insert(dev_name, Arc::new(Mutex::new(dev)));
         }
         // Make a collection of `Arc` clones to be eventually passed into worker threads
-        // let running_devs = self.running_devs.clone();
-        let running_devs: IndexMap<String, Arc<Mutex<NIDev>>> = self.running_devs
+        let running_devs_clone: IndexMap<String, Arc<Mutex<NIDev>>> = self.running_devs
             .iter()
             .map(|(name, arc_mutex_dev)| (name.clone(), arc_mutex_dev.clone()))
             .collect();
@@ -298,15 +302,16 @@ impl Streamer {
         let stop_requested_clone = stop_requested.clone();
 
         // (3) Launch manager thread
+        let chunksize_ms = self.chunksize_ms.clone();
         let spawn_result = thread::Builder::new()
             .name("Manager".to_string())
             .spawn(move || {manager_loop(
-                running_devs,
+                running_devs_clone,
                 cmd_recvr,
                 report_sender,
                 stop_requested_clone,
                 starts_last_clone,
-                bufsize_ms,
+                chunksize_ms,
             )});
         if spawn_result.is_err() {
             // Most likely OS failed to spawn the thread
@@ -328,9 +333,10 @@ impl Streamer {
         // Manager will report the final status back here.
         /*
             Manager will collect reports from all workers.
-            If all succeeded, manager reports success back to main and starts waiting for commands.
-            If any worker failed, manager will clean up all remaining workers, submit error report back to main,
-            and finally return. So main thread only has to join the already-returned manager handle.
+            - If all succeeded, manager reports success back to main and starts waiting for commands.
+            - If any worker failed, manager will clean up all remaining workers, and will finally return
+            leaving the error info in the returned message. So `main` thread would only have to join
+            the already-returned `manager` handle to collect the message.
         */
         let recv_res = self.stream_controls.as_ref().unwrap().manager_report_recvr.recv();
         if recv_res.is_ok() {

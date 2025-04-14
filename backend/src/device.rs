@@ -231,14 +231,14 @@ pub trait RunControl: CommonHwCfg {
     /// that the device has been properly compiled before calling this method.
     fn worker_loop(
         &mut self,
-        bufsize_ms: f64,
+        chunksize_ms: f64,
         mut cmd_recvr: CmdRecvr,
         report_sender: Sender<WorkerReport>,
         stop_flag: Arc<Mutex<bool>>,
         start_sync: StartSync,
         target_rep_dur: f64,
     ) -> Result<(), WorkerError> {
-        let (mut stream_bundle, mut samp_bufs) = self.cfg_run_(bufsize_ms, target_rep_dur)?;
+        let (mut stream_bundle, mut samp_bufs) = self.cfg_run_(chunksize_ms, target_rep_dur)?;
         report_sender.send(WorkerReport::InitComplete)?;
 
         loop {
@@ -254,17 +254,17 @@ pub trait RunControl: CommonHwCfg {
         };
         Ok(())
     }
-    fn cfg_run_(&mut self, bufsize_ms: f64, target_rep_dur: f64) -> Result<(StreamBundle, SampBufs), WorkerError> {
-        let buf_dur = bufsize_ms / 1000.0;
+    fn cfg_run_(&mut self, chunksize_ms: f64, target_rep_dur: f64) -> Result<(StreamBundle, SampBufs), WorkerError> {
+        let chunk_dur = chunksize_ms / 1000.0;
         let buf_write_timeout = match &self.hw_cfg().min_bufwrite_timeout {
-            Some(min_timeout) => Some(f64::max(10.0*buf_dur, *min_timeout)),
+            Some(min_timeout) => Some(f64::max(10.0*chunk_dur, *min_timeout)),
             None => None,
         };
 
         let seq_len = self.total_samps();
         let buf_size = std::cmp::min(
             seq_len,
-            (buf_dur * self.samp_rate()).round() as usize,
+            (chunk_dur * self.samp_rate()).round() as usize,
         );
         let mut samp_buf = self.alloc_samp_bufs(buf_size);
         let counter = StreamCounter::new(seq_len, buf_size);
@@ -1124,6 +1124,21 @@ impl NIDev {
         match self {
             NIDev::AO(dev) => dev.compiled_stop_time(),
             NIDev::DO(dev) => dev.compiled_stop_time(),
+        }
+    }
+
+    pub fn worker_loop(
+        &mut self,
+        chunksize_ms: f64,
+        mut cmd_recvr: CmdRecvr,
+        report_sender: Sender<WorkerReport>,
+        stop_flag: Arc<Mutex<bool>>,
+        start_sync: StartSync,
+        target_rep_dur: f64,
+    ) -> Result<(), WorkerError> {
+        match self {
+            NIDev::AO(dev) => dev.worker_loop(chunksize_ms, cmd_recvr, report_sender, stop_flag, start_sync, target_rep_dur),
+            NIDev::DO(dev) => dev.worker_loop(chunksize_ms, cmd_recvr, report_sender, stop_flag, start_sync, target_rep_dur),
         }
     }
 }
