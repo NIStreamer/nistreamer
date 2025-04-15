@@ -238,13 +238,13 @@ pub trait RunControl: CommonHwCfg {
         start_sync: StartSync,
         target_rep_dur: f64,
     ) -> Result<(), WorkerError> {
-        let (mut stream_bundle, mut samp_bufs) = self.cfg_run_(chunksize_ms, target_rep_dur)?;
+        let (mut stream_bundle, mut samp_bufs) = self.init_stream(chunksize_ms, target_rep_dur)?;
         report_sender.send(WorkerReport::InitComplete)?;
 
         loop {
             match cmd_recvr.recv()? {
-                WorkerCmd::Run(calc_next, nreps) => {
-                    self.stream_run_(&mut stream_bundle, &mut samp_bufs, &report_sender, &stop_flag, &start_sync, calc_next, nreps)?;
+                WorkerCmd::Run(nreps) => {
+                    self.run(&mut stream_bundle, &mut samp_bufs, &report_sender, &stop_flag, &start_sync, nreps)?;
                     report_sender.send(WorkerReport::RunFinished)?;
                 },
                 WorkerCmd::Close => {
@@ -254,7 +254,7 @@ pub trait RunControl: CommonHwCfg {
         };
         Ok(())
     }
-    fn cfg_run_(&mut self, chunksize_ms: f64, target_rep_dur: f64) -> Result<(StreamBundle, SampBufs), WorkerError> {
+    fn init_stream(&mut self, chunksize_ms: f64, target_rep_dur: f64) -> Result<(StreamBundle, SampBufs), WorkerError> {
         let chunk_dur = chunksize_ms / 1000.0;
         let buf_write_timeout = match &self.hw_cfg().min_bufwrite_timeout {
             Some(min_timeout) => Some(f64::max(10.0*chunk_dur, *min_timeout)),
@@ -293,17 +293,16 @@ pub trait RunControl: CommonHwCfg {
 
         Ok((stream_bundle, samp_buf))
     }
-    fn stream_run_(
+    fn run(
         &mut self,
         stream_bundle: &mut StreamBundle,
         samp_bufs: &mut SampBufs,
         report_sender: &Sender<WorkerReport>,
         stop_flag: &Arc<Mutex<bool>>,
         start_sync: &StartSync,
-        calc_next: bool,
         nreps: usize,
     ) -> Result<(), WorkerError> {
-        // Synchronise task start with other threads
+        // (1) Synchronise task start with other threads
         match start_sync {
             StartSync::Primary(recvr_vec) => {
                 for recvr in recvr_vec {
@@ -318,7 +317,7 @@ pub trait RunControl: CommonHwCfg {
             StartSync::None => stream_bundle.ni_task.start()?
         };
 
-        // Main streaming loop
+        // (2) Waveform streaming / in-stream repetition loop
         for rep_idx in 0..nreps {
             // Stream the waveform itself
             while let Some((start_pos, end_pos)) = stream_bundle.counter.tick_next() {
@@ -328,7 +327,8 @@ pub trait RunControl: CommonHwCfg {
             stream_bundle.counter.reset();
 
             // Padding samps to align stop time of this device to all others
-            /* Clock grids of different devices may not align due to incommensurate sampling rates
+            /*
+               Clock grids of different devices may not align due to incommensurate sampling rates
                plus some devices may get an extra tick at the end when compiling due to closing edge clipping.
                As a result, different devices will in general have different single-sequence play durations.
 
@@ -341,7 +341,8 @@ pub trait RunControl: CommonHwCfg {
 
                (cards will still stop at slightly different times since clock grids generally don't align,
                 but this difference will always be within a single clock period from the common target
-                instead of building up with subsequent repetitions) */
+                instead of building up with subsequent repetitions)
+            */
             let target_stop_time = stream_bundle.target_rep_dur * (rep_idx + 1) as f64;
             let target_stop_pos = (target_stop_time * self.samp_rate()).round() as u64;
             // - assertion check
@@ -366,34 +367,33 @@ pub trait RunControl: CommonHwCfg {
             }
         }
 
-        // "Soft Stop"
+        // (3) "Soft Stop"
+        /*
+           After finishing writing all the waveform samples we additionally write a full "dummy" chunk
+           filled with the last written values for each channel. When streamer plays out all the waveform samples,
+           generation moves into the dummy samples - the task is still running, but the outputs are effectively kept constant.
+           During this period we can call stop on the task at any moment.
 
-        // Now need to wait for the final sample chunk to be generated out by the card before stopping the task.
-        // In the mean time, we can calculate the initial chunk for the next repetition in the case we are on repeat.
-        if !calc_next {
-            // Prepare and write the final dummy buffer for "soft stop"
-            self.fill_with_last_written_vals(&stream_bundle.ni_task, samp_bufs, stream_bundle.buf_size)?;
-            self.write_to_hardware(stream_bundle, samp_bufs, stream_bundle.buf_size)?;
+           Even after writing in the whole dummy buffer, there is still about 20% of the finial waveform chunk
+           left to play out. We use this time to calculate the initial chunk for the next launch and start waiting
+           for entering the dummy buffer only after that.
+        */
+        // - prepare and write the final dummy buffer for "soft stop"
+        self.fill_with_last_written_vals(&stream_bundle.ni_task, samp_bufs, stream_bundle.buf_size)?;
+        self.write_to_hardware(stream_bundle, samp_bufs, stream_bundle.buf_size)?;
 
-            // Wait until sequence generation is finished
-            Self::wait_until_done_and_stop(stream_bundle)?;
-        } else {
-            // Prepare and write the final dummy buffer for "soft stop"
-            self.fill_with_last_written_vals(&stream_bundle.ni_task, samp_bufs, stream_bundle.buf_size)?;
-            self.write_to_hardware(stream_bundle, samp_bufs, stream_bundle.buf_size)?;
+        // - calculate the initial chunk for the next run launch while generation is finishing
+        stream_bundle.counter.reset();
+        let (start_pos, end_pos) = stream_bundle.counter.tick_next().unwrap();
+        self.calc_samps(samp_bufs, start_pos, end_pos)?;
 
-            // Calculate the initial chunk for the next run while generation is finishing
-            stream_bundle.counter.reset();
-            let (start_pos, end_pos) = stream_bundle.counter.tick_next().unwrap();
-            self.calc_samps(samp_bufs, start_pos, end_pos)?;
+        // - wait until sequence generation is finished
+        Self::wait_until_done_and_stop(stream_bundle)?;
 
-            // Wait until sequence generation is finished
-            Self::wait_until_done_and_stop(stream_bundle)?;
+        // - write the initial chunk for the next launch
+        stream_bundle.total_written = 0;
+        stream_bundle.total_written += self.write_to_hardware(stream_bundle, samp_bufs, end_pos - start_pos)? as u64;
 
-            // Write the initial chunk for the next repetition
-            stream_bundle.total_written = 0;
-            stream_bundle.total_written += self.write_to_hardware(stream_bundle, samp_bufs, end_pos - start_pos)? as u64;
-        }
         Ok(())
     }
 

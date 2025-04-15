@@ -356,19 +356,19 @@ impl Streamer {
         if self.stream_controls.is_none() {
             return Err("Stream is not initialized".to_string())
         }
-        let stream_controls = self.stream_controls.as_mut().unwrap();
-        match stream_controls.status {
+        let controls = self.stream_controls.as_mut().unwrap();
+        match controls.status {
             StreamStatus::Ready => { /* good to go */ },
             StreamStatus::Running => return Err("Stream is already running".to_string()),
         }
 
         // (2) Command manager to launch the run
-        *stream_controls.stop_requested.lock() = false;
-        let send_res = stream_controls.manager_cmd_sender.send(ManagerCmd::Launch(nreps));
+        *controls.stop_requested.lock() = false;
+        let send_res = controls.manager_cmd_sender.send(ManagerCmd::Launch(nreps));
 
         // (3) Handle the case the manager has quit already and return
         if send_res.is_ok() {
-            stream_controls.status = StreamStatus::Running;
+            controls.status = StreamStatus::Running;
             Ok(())
         } else {
             // Manager thread dropped its' side of the command channel - it must have quit due to an error.
@@ -381,10 +381,10 @@ impl Streamer {
         if self.stream_controls.is_none() {
             return Err("Stream is not initialized".to_string())
         }
-        let stream_controls = self.stream_controls.as_ref().unwrap();
-        match stream_controls.status {
+        let controls = self.stream_controls.as_ref().unwrap();
+        match controls.status {
             StreamStatus::Running => {
-                *stream_controls.stop_requested.lock() = true;
+                *controls.stop_requested.lock() = true;
                 Ok(())
             },
             StreamStatus::Ready => Ok(()),
@@ -395,14 +395,17 @@ impl Streamer {
         if self.stream_controls.is_none() {
             return Err(WaitUntilFinishedErr::Failed("Stream is not initialized".to_string()))
         };
-        let stream_controls = self.stream_controls.as_mut().unwrap();
-        match stream_controls.status {
+        let controls = self.stream_controls.as_mut().unwrap();
+        match controls.status {
             StreamStatus::Running => { /* Should wait. Moving further in logic */ },
             StreamStatus::Ready => return Ok(()),  // Stream is idle, return immediately.
         }
 
-        match stream_controls.manager_report_recvr.recv_timeout(timeout) {
-            Ok(()) => Ok(()),
+        match controls.manager_report_recvr.recv_timeout(timeout) {
+            Ok(()) => {
+                controls.status = StreamStatus::Ready;
+                Ok(())
+            },
             Err(recv_err) => match recv_err {
                 RecvTimeoutError::Timeout => Err(WaitUntilFinishedErr::Timeout),
                 RecvTimeoutError::Disconnected => {
@@ -457,8 +460,8 @@ impl Streamer {
     /// **Warning**: this method will block until manager thread joins.
     /// Only call it if you are sure the manager has stopped already or will stop later.
     fn collect_err_info_undo_init_changes(&mut self) -> String {
-        let controls_bundle = self.stream_controls.take().unwrap();  // also sets `self.stream_controls` to `None`
-        let err_msg = match controls_bundle.manager_handle.join() {
+        let controls = self.stream_controls.take().unwrap();  // also sets `self.stream_controls` to `None`
+        let err_msg = match controls.manager_handle.join() {
             Ok(manager_res) => match manager_res {
                 Err(err_info) => err_info,
                 Ok(()) => "[BUG] Manager has quit unexpectedly, yet returned Ok".to_string(),
@@ -652,7 +655,7 @@ impl Streamer {
         }
     }
     pub fn stream_run_(&mut self, calc_next: bool, nreps: usize) -> Result<(), String> {
-        self.worker_cmd_chan.send(WorkerCmd::Run(calc_next, nreps));
+        // self.worker_cmd_chan.send(WorkerCmd::Run(calc_next, nreps));
         self.collect_worker_reports()
     }
     pub fn close_run_(&mut self) -> Result<(), String> {

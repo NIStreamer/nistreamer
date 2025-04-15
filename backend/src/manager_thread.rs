@@ -67,7 +67,10 @@ pub fn manager_loop(
 
         loop {
             match cmd_recvr.recv()? {
-                ManagerCmd::Launch(nreps) => { manager.run(nreps)? }
+                ManagerCmd::Launch(nreps) => {
+                    manager.run(nreps)?;
+                    report_sender.send(())?;
+                },
                 ManagerCmd::Close => {
                     break
                 }
@@ -194,11 +197,14 @@ impl StreamManager {
     pub fn run(&self, nreps: usize) -> Result<(), ManagerErr> {
         // (1) Command all workers to start running
         *self.stop_flag.lock() = false;
-        self.worker_cmd_chan.send(WorkerCmd::Run(true, nreps));
+        self.worker_cmd_chan.send(WorkerCmd::Run(nreps));
         let mut stopped_by_request = false;
 
         // (2) Keep checking on all workers throughout the run + react to stop request from `main` thread
-        /* Each worker should report iteration completion. This is done to catch worker failures at runtime which will show up as `RecvErr` when trying to `recv()` the report. */
+        /*
+           Every worker should report completion of each iteration.
+           This is done to catch worker failures at runtime which will show up as `RecvErr` when trying to `recv()` the report.
+        */
         for rep_idx in 0..nreps {
             for (name, report_recvr) in self.worker_report_recvrs.iter() {
                 match report_recvr.recv().map_err(|_| format!("[Repetition {rep_idx}] worker {name} failed"))? {
@@ -214,9 +220,10 @@ impl StreamManager {
             }
         }
 
-        // (3) Wait for every worker to report that it has completed "soft stop" and finished running.
+        // (3) Wait for every worker to report that it has completed "soft stop" and transitioned to the `Ready` state.
         // Any worker failing will show up as `RecvErr` when trying to `recv()` the report.
-        /* Note:
+        /*
+           Note:
             If run was interrupted by `main_requested_stop` there is an uncertainty in when each worker notices that `stop_flag` was raised.
             If some worker was "ahead", it might have checked for `stop_flag` and started another repetition before the flag was raised.
             As a result, different workers may complete different number of repetitions before stopping.
@@ -232,11 +239,13 @@ impl StreamManager {
                             // "Swallow" this extra `IterComplete` and continue waiting for `RunFinished`
                             continue
                         } else {
-                            // This is unexpected - run was not stopped by external request, so every worker was expected to report `IterComplete` precisely `nreps` times
+                            // This is unexpected - run was not stopped by external request,
+                            // so every worker was expected to report `IterComplete` precisely `nreps` times
+                            // which were already counted up in the previous `for`-loop
                             return Err(ManagerErr::new(format!("[BUG] worker {name} reported an unexpected extra `IterComplete`")))
                         }
                     },
-                    other_unexpected => return Err(ManagerErr::new(format!("[BUG] Expected to receive `WorkerReport::IterComplete` but worker {name} reported {other_unexpected:?}")))
+                    other_unexpected => return Err(ManagerErr::new(format!("[BUG] Expected to receive `WorkerReport::RunFinished/IterComplete` but worker {name} reported {other_unexpected:?}")))
                 }
             }
         }
