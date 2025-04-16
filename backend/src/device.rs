@@ -243,10 +243,7 @@ pub trait RunControl: CommonHwCfg {
 
         loop {
             match cmd_recvr.recv()? {
-                WorkerCmd::Run(nreps) => {
-                    self.run(&mut stream_bundle, &mut samp_bufs, &report_sender, &stop_flag, &start_sync, nreps)?;
-                    report_sender.send(WorkerReport::RunFinished)?;
-                },
+                WorkerCmd::Run(nreps) => { self.run(&mut stream_bundle, &mut samp_bufs, &report_sender, &stop_flag, &start_sync, nreps)? },
                 WorkerCmd::Close => {
                     break
                 }
@@ -393,6 +390,9 @@ pub trait RunControl: CommonHwCfg {
         // - write the initial chunk for the next launch
         stream_bundle.total_written = 0;
         stream_bundle.total_written += self.write_to_hardware(stream_bundle, samp_bufs, end_pos - start_pos)? as u64;
+
+        // Report to `manager` that run was finished
+        report_sender.send(WorkerReport::RunFinished)?;
 
         Ok(())
     }
