@@ -4,7 +4,7 @@
 
 use pyo3::prelude::*;
 use pyo3::PyResult;
-use pyo3::exceptions::{PyValueError, PyKeyError, PyRuntimeError};
+use pyo3::exceptions::{PyValueError, PyKeyError, PyRuntimeError, PyTimeoutError};
 
 use base_streamer::channel::BaseChan;
 use base_streamer::device::BaseDev;
@@ -13,7 +13,7 @@ use base_streamer::fn_lib_tools::{FnBoxF64, FnBoxBool};
 
 use crate::channel::{AOChan, DOChan};
 use crate::device::{AODev, DODev, NIDev, CommonHwCfg};
-use crate::streamer::Streamer;
+use crate::streamer::{Streamer, WaitUntilFinishedErr};
 
 #[pyclass]
 pub struct StreamerWrap {
@@ -46,6 +46,15 @@ impl StreamerWrap {
     }
 
     // region Hardware settings
+    pub fn get_chunksize_ms(&self) -> f64 {
+        self.inner.get_chunksize_ms()
+    }
+    pub fn set_chunksize_ms(&mut self, val: f64) -> PyResult<()> {
+        self.inner
+            .set_chunksize_ms(val)
+            .map_err(|msg| PyValueError::new_err(msg))
+    }
+
     pub fn get_starts_last(&self) -> Option<String> {
         self.inner.get_starts_last()
     }
@@ -111,7 +120,46 @@ impl StreamerWrap {
     }
     // endregion
 
-    // region Run control
+    // region Stream control
+    pub fn init_stream(&mut self) -> PyResult<()> {
+        self.inner
+            .init_stream()
+            .map_err(|msg| PyValueError::new_err(msg))
+    }
+
+    pub fn launch_run(&mut self, nreps: usize) -> PyResult<()> {
+        self.inner
+            .launch_run(nreps)
+            .map_err(|msg| PyRuntimeError::new_err(msg))
+    }
+
+    pub fn request_stop(&self) -> PyResult<()> {
+        self.inner
+            .request_stop()
+            .map_err(|msg| PyRuntimeError::new_err(msg))
+    }
+
+    pub fn wait_until_finished(&mut self, timeout: f64) -> PyResult<()> {
+        let timeout = std::time::Duration::from_secs_f64(timeout);
+        match self.inner.wait_until_finished(timeout) {
+            Ok(()) => Ok(()),
+            Err(WaitUntilFinishedErr::Timeout) => Err(PyTimeoutError::new_err("")),
+            Err(WaitUntilFinishedErr::Failed(msg)) => Err(PyRuntimeError::new_err(msg)),
+        }
+    }
+
+    pub fn reps_written_count(&self) -> PyResult<usize> {
+        self.inner
+            .reps_written_count()
+            .map_err(|msg| PyRuntimeError::new_err(msg))
+    }
+
+    pub fn close_stream(&mut self) -> PyResult<()> {
+        self.inner
+            .close_stream()
+            .map_err(|msg| PyRuntimeError::new_err(msg))
+    }
+
     pub fn cfg_run(&mut self, bufsize_ms: f64) -> PyResult<()> {
         match self.inner.cfg_run_(bufsize_ms) {
             Ok(()) => Ok(()),
