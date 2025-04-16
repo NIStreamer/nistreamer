@@ -10,7 +10,7 @@ use crate::device::{RunControl, NIDev, StartSync, WorkerReport, WorkerError};
 use crate::worker_cmd_chan::{CmdChan, WorkerCmd};
 
 pub enum ManagerCmd {
-    Launch(usize),
+    Launch(usize, Arc<Mutex<usize>>),  // `usize` - nreps, `Arc<Mutex<usize>>` - shared "reps written" counter
     Close,
 }
 
@@ -67,8 +67,8 @@ pub fn manager_loop(
 
         loop {
             match cmd_recvr.recv()? {
-                ManagerCmd::Launch(nreps) => {
-                    manager.run(nreps)?;
+                ManagerCmd::Launch(nreps, reps_written_count) => {
+                    manager.run(nreps, reps_written_count)?;
                     report_sender.send(())?;
                 },
                 ManagerCmd::Close => {
@@ -194,7 +194,7 @@ impl StreamManager {
         Ok(())
     }
 
-    pub fn run(&self, nreps: usize) -> Result<(), ManagerErr> {
+    pub fn run(&self, nreps: usize, reps_written_count: Arc<Mutex<usize>>) -> Result<(), ManagerErr> {
         // (1) Command all workers to start running
         *self.stop_flag.lock() = false;
         self.worker_cmd_chan.send(WorkerCmd::Run(nreps));
@@ -212,6 +212,8 @@ impl StreamManager {
                     other_unexpected => return Err(ManagerErr::new(format!("[BUG] Expected to receive `WorkerReport::IterComplete` but worker {name} reported {other_unexpected:?}")))
                 }
             }
+            // Update "reps_written" counter
+            *reps_written_count.lock() = rep_idx + 1;
             // Check if stop was requested by `main` thread
             if *self.main_requested_stop.lock() {
                 *self.stop_flag.lock() = true;

@@ -65,10 +65,10 @@ use crate::nidaqmx;
 use crate::nidaqmx::DAQmxError;
 use crate::worker_cmd_chan::{CmdChan, CmdRecvr, WorkerCmd};
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Debug)]
 pub enum StreamStatus {
     Ready,
-    Running,
+    Running(Arc<Mutex<usize>>),  // "reps written" counter
 }
 
 pub struct StreamControls {
@@ -359,16 +359,19 @@ impl Streamer {
         let controls = self.stream_controls.as_mut().unwrap();
         match controls.status {
             StreamStatus::Ready => { /* good to go */ },
-            StreamStatus::Running => return Err("Stream is already running".to_string()),
+            StreamStatus::Running(_) => return Err("Stream is already running".to_string()),
         }
 
         // (2) Command manager to launch the run
         *controls.stop_requested.lock() = false;
-        let send_res = controls.manager_cmd_sender.send(ManagerCmd::Launch(nreps));
+        let reps_written_count = Arc::new(Mutex::new(0));
+        let send_res = controls.manager_cmd_sender.send(
+            ManagerCmd::Launch(nreps, reps_written_count.clone())
+        );
 
         // (3) Handle the case the manager has quit already and return
         if send_res.is_ok() {
-            controls.status = StreamStatus::Running;
+            controls.status = StreamStatus::Running(reps_written_count);
             Ok(())
         } else {
             // Manager thread dropped its' side of the command channel - it must have quit due to an error.
@@ -383,7 +386,7 @@ impl Streamer {
         }
         let controls = self.stream_controls.as_ref().unwrap();
         match controls.status {
-            StreamStatus::Running => {
+            StreamStatus::Running(_) => {
                 *controls.stop_requested.lock() = true;
                 Ok(())
             },
@@ -397,7 +400,7 @@ impl Streamer {
         };
         let controls = self.stream_controls.as_mut().unwrap();
         match controls.status {
-            StreamStatus::Running => { /* Should wait. Moving further in logic */ },
+            StreamStatus::Running(_) => { /* Should wait. Moving further in logic */ },
             StreamStatus::Ready => return Ok(()),  // Stream is idle, return immediately.
         }
 
@@ -415,6 +418,27 @@ impl Streamer {
                     Err(WaitUntilFinishedErr::Failed(err_msg))
                 }
             }
+        }
+    }
+
+    /// Returns the number of waveform repetitions (per device) that all devices have fully sampled
+    /// and written into the onboard buffer already (some devices may have written more than that).
+    ///
+    /// **WARNING:** this number does not precisely reflect how many repetitions have been **generated out** already.
+    /// Samples are calculated and written to devices some time ahead of when they will actually be output
+    /// (this is necessary for stream stability). This function tracks how many has been _calculated and written_
+    /// rather than how many has been _actually output_.
+    ///
+    /// So this value should only be used as a coarse progress indicator for monitoring purposes only,
+    /// it is not suitable as a sync mechanism.
+    pub fn reps_written_count(&self) -> Result<usize, String> {
+        if self.stream_controls.is_none() {
+            return Err("Stream is not initialized".to_string())
+        }
+        let controls = self.stream_controls.as_ref().unwrap();
+        match &controls.status {
+            StreamStatus::Running(reps_written_count) => Ok(reps_written_count.lock().clone()),
+            StreamStatus::Ready => Err("Stream is not currently running".to_string())
         }
     }
 
