@@ -143,7 +143,7 @@ impl StreamerWrap {
         let timeout = std::time::Duration::from_secs_f64(timeout);
         match self.inner.wait_until_finished(timeout) {
             Ok(()) => Ok(()),
-            Err(WaitUntilFinishedErr::Timeout) => Err(PyTimeoutError::new_err("")),
+            Err(WaitUntilFinishedErr::Timeout) => Err(PyTimeoutError::new_err("Streamer hasn't finished before wait timeout elapsed")),
             Err(WaitUntilFinishedErr::Failed(msg)) => Err(PyRuntimeError::new_err(msg)),
         }
     }
