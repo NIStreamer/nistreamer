@@ -90,11 +90,12 @@ pub fn manager_loop(
         Ok(())
     } else {
         let mut joint_err_msg = String::new();
-        if let Err(err) = closure_result {
-            joint_err_msg.push_str(&format!("\nManager error report: \n{}", err.to_string()))
-        }
         if let Err(msg) = worker_results {
-            joint_err_msg.push_str(&format!("\nWorker error reports: \n{msg}"))
+            joint_err_msg.push_str(&format!("\nWorker error reports: \n\n{msg}"))
+        }
+        if let Err(err) = closure_result {
+            joint_err_msg.push_str(&format!("\nManager error report was printed to console.\n"));
+            println!("Manager error report: {}", err.to_string())
         }
         Err(joint_err_msg)
     }
@@ -298,7 +299,7 @@ impl StreamManager {
         } else {
             let mut joint_err_msg = String::new();
             for (name, msg) in err_msgs {
-                joint_err_msg.push_str(&format!("[{name}] {msg}\n"))
+                joint_err_msg.push_str(&format!("[{name}] {msg}\n\n"))
             }
             Err(joint_err_msg)
         }
