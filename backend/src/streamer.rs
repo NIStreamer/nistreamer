@@ -330,13 +330,16 @@ impl Streamer {
         });
 
         // (5) Now wait for the manager to launch all the worker threads and all workers to init hardware.
-        // Manager will report the final status back here.
         /*
             Manager will collect reports from all workers.
-            - If all succeeded, manager reports success back to main and starts waiting for commands.
-            - If any worker failed, manager will clean up all remaining workers, and will finally return
-            leaving the error info in the returned message. So `main` thread would only have to join
-            the already-returned `manager` handle to collect the message.
+            - If all succeed, `manager` reports success back to `main` and starts waiting for commands.
+              Success is reported by sending `()` back to `main`.
+
+            - If any worker fails, the `manager` will automatically clean up all remaining workers,
+              and will finally return leaving the error info in the returned message.
+              The `main` thread will know about the failure by getting an error on trying to receive the report
+              because manager drops its' side of the channel when quitting.
+              Then `main` only needs to join the already-returned `manager` handle to collect the error message.
         */
         let recv_res = self.stream_controls.as_ref().unwrap().manager_report_recvr.recv();
         if recv_res.is_ok() {
