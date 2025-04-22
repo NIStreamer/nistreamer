@@ -312,8 +312,12 @@ impl NiTask {
                 chan_samps.extend_from_slice(&samp_buf[chan_idx * samp_num .. (chan_idx + 1) * samp_num]);
             }
         }
-        // let approx_wait_time = 0.8 * 100e-9 * samp_num as f64;  // 100 ns - sample clock period assuming 10 MSa/s sampling rate for DO card
-        // std::thread::sleep(std::time::Duration::from_secs_f64(approx_wait_time));
+
+        // Imitate waiting for buffer space to become available as samples are generated out
+        if self.last_written_vals_u32.borrow().is_some() {
+            let approx_wait_time = samp_num as f64 / self.samp_rate.get();
+            std::thread::sleep(std::time::Duration::from_secs_f64(approx_wait_time));
+        }
 
         // Safe last written values
         let last_written_vals = Self::pick_last_vals(samp_buf, self.do_chans.borrow().len(), samp_num)?;
@@ -334,8 +338,12 @@ impl NiTask {
                 chan_samps.extend_from_slice(&samp_buf[chan_idx * samp_num .. (chan_idx + 1) * samp_num]);
             }
         }
-        // let approx_wait_time = 0.8 * 1e-6 * samp_num as f64;  // 1 us - sample clock period assuming 1 MSa/s sampling rate for AO card
-        // std::thread::sleep(std::time::Duration::from_secs_f64(approx_wait_time));
+
+        // Imitate waiting for buffer space to become available as samples are generated out
+        if self.last_written_vals_f64.borrow().is_some() {
+            let approx_wait_time = samp_num as f64 / self.samp_rate.get();
+            std::thread::sleep(std::time::Duration::from_secs_f64(approx_wait_time));
+        }
 
         // Safe last written values
         let last_written_vals = Self::pick_last_vals(samp_buf, self.ao_chans.borrow().len(), samp_num)?;
