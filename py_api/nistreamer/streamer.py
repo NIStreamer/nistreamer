@@ -191,6 +191,9 @@ class NIStreamer:
         """
         self._streamer.validate_compile_cache()
 
+    def init_stream(self):
+        return ContextManager(streamer=self._streamer)
+
     def run(self, nreps: Optional[int] = 1, bufsize_ms: Optional[float] = 150) -> None:
         try:
             self._streamer.cfg_run(bufsize_ms=bufsize_ms)
@@ -207,3 +210,45 @@ class NIStreamer:
 
     def reset_all(self):
         self._streamer.reset_all()
+
+
+class ContextManager:
+    """Using explicit context manager class instead of `contextlib.contextmanager` decorator
+    because it results in a shorter traceback from exceptions during `__enter__()`
+    (common cause - errors in `init_stream()` due to the user providing invalid settings)
+    """
+
+    def __init__(self, streamer):
+        self._streamer = streamer
+
+    def __enter__(self):
+        self._streamer.init_stream()
+        return StreamHandle(streamer=self._streamer)
+
+    def __exit__(self, *args, **kwargs):
+        self._streamer.close_stream()
+
+
+class StreamHandle:
+    def __init__(self, streamer):
+        self._streamer = streamer
+
+    def launch_run(self, nreps=1):
+        self._streamer.launch_run(nreps=nreps)
+
+    def wait_until_finished(self):
+        # ToDo: revise (double exception TimeoutError + KeyboardInterrupt)
+        #  Maybe return `True/False` from `wait_until_finished()` instead of timeout exception
+        while True:
+            try:
+                self._streamer.wait_until_finished(timeout=1.0)
+                break
+            except TimeoutError:
+                continue
+
+    def request_stop(self):
+        self._streamer.request_stop()
+
+    def reps_written_count(self):
+        return self._streamer.reps_written_count()
+
