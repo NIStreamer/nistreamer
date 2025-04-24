@@ -67,7 +67,7 @@ use crate::worker_cmd_chan::{CmdChan, CmdRecvr, WorkerCmd};
 
 #[derive(Debug)]
 pub enum StreamStatus {
-    Ready,
+    Idle,
     Running(Arc<Mutex<usize>>),  // "reps written" counter
 }
 
@@ -78,11 +78,6 @@ pub struct StreamControls {
     stop_requested: Arc<Mutex<bool>>,
     // Internal variable to remember stream state:
     status: StreamStatus,
-}
-
-pub enum WaitUntilFinishedErr {
-    Timeout,
-    Failed(String),
 }
 
 /// An extended version of the [`nicompiler_backend::Experiment`] struct, tailored to provide direct
@@ -326,7 +321,7 @@ impl Streamer {
             manager_cmd_sender: cmd_sender,
             manager_report_recvr: report_recvr,
             stop_requested,
-            status: StreamStatus::Ready,
+            status: StreamStatus::Idle,
         });
 
         // (5) Now wait for the manager to launch all the worker threads and all workers to init hardware.
@@ -361,7 +356,7 @@ impl Streamer {
         }
         let controls = self.stream_controls.as_mut().unwrap();
         match controls.status {
-            StreamStatus::Ready => { /* good to go */ },
+            StreamStatus::Idle => { /* good to go */ },
             StreamStatus::Running(_) => return Err("Stream is already running".to_string()),
         }
 
@@ -393,32 +388,34 @@ impl Streamer {
                 *controls.stop_requested.lock() = true;
                 Ok(())
             },
-            StreamStatus::Ready => Ok(()),
+            StreamStatus::Idle => Ok(()),
         }
     }
 
-    pub fn wait_until_finished(&mut self, timeout: Duration) -> Result<(), WaitUntilFinishedErr> {
+    pub fn wait_until_finished(&mut self, timeout: Duration) -> Result<bool, String> {
         if self.stream_controls.is_none() {
-            return Err(WaitUntilFinishedErr::Failed("Stream is not initialized".to_string()))
+            return Err("Stream is not initialized".to_string())
         };
         let controls = self.stream_controls.as_mut().unwrap();
         match controls.status {
             StreamStatus::Running(_) => { /* Should wait. Moving further in logic */ },
-            StreamStatus::Ready => return Ok(()),  // Stream is idle, return immediately.
+            StreamStatus::Idle => return Ok(true),  // Stream is idle, return immediately.
         }
 
         match controls.manager_report_recvr.recv_timeout(timeout) {
             Ok(()) => {
-                controls.status = StreamStatus::Ready;
-                Ok(())
+                controls.status = StreamStatus::Idle;
+                Ok(true)
             },
             Err(recv_err) => match recv_err {
-                RecvTimeoutError::Timeout => Err(WaitUntilFinishedErr::Timeout),
+                RecvTimeoutError::Timeout => {
+                    Ok(false)
+                },
                 RecvTimeoutError::Disconnected => {
                     // Manager thread dropped its' side of the command channel - it must have quit due to an error.
                     // Error info should be contained in the returned value - use join handle to retrieve it.
                     let err_msg = self.collect_err_info_undo_init_changes();
-                    Err(WaitUntilFinishedErr::Failed(err_msg))
+                    Err(err_msg)
                 }
             }
         }
@@ -441,7 +438,7 @@ impl Streamer {
         let controls = self.stream_controls.as_ref().unwrap();
         match &controls.status {
             StreamStatus::Running(reps_written_count) => Ok(reps_written_count.lock().clone()),
-            StreamStatus::Ready => Err("Stream is not currently running".to_string())
+            StreamStatus::Idle => Err("Stream is not currently running".to_string())
         }
     }
 

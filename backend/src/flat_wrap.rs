@@ -13,7 +13,7 @@ use base_streamer::fn_lib_tools::{FnBoxF64, FnBoxBool};
 
 use crate::channel::{AOChan, DOChan};
 use crate::device::{AODev, DODev, NIDev, CommonHwCfg};
-use crate::streamer::{Streamer, WaitUntilFinishedErr};
+use crate::streamer::Streamer;
 
 #[pyclass]
 pub struct StreamerWrap {
@@ -139,13 +139,11 @@ impl StreamerWrap {
             .map_err(|msg| PyRuntimeError::new_err(msg))
     }
 
-    pub fn wait_until_finished(&mut self, timeout: f64) -> PyResult<()> {
+    pub fn wait_until_finished(&mut self, timeout: f64) -> PyResult<bool> {
         let timeout = std::time::Duration::from_secs_f64(timeout);
-        match self.inner.wait_until_finished(timeout) {
-            Ok(()) => Ok(()),
-            Err(WaitUntilFinishedErr::Timeout) => Err(PyTimeoutError::new_err("Streamer hasn't finished before wait timeout elapsed")),
-            Err(WaitUntilFinishedErr::Failed(msg)) => Err(PyRuntimeError::new_err(msg)),
-        }
+        self.inner
+            .wait_until_finished(timeout)
+            .map_err(|msg| PyRuntimeError::new_err(msg))
     }
 
     pub fn reps_written_count(&self) -> PyResult<usize> {

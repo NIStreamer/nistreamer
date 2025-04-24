@@ -26,6 +26,7 @@ class NIStreamer:
             f'DO cards: {list(self._do_cards.keys())}\n'
             f'\n'
             f'Hardware settings:\n'
+            f'\t   Chunk size (ms): {self.chunksize_ms}\n'
             f'\t10MHz ref provider: {self.ref_clk_provider}\n'
             f'\t  Starts-last card: {self.starts_last}'
         )
@@ -118,6 +119,14 @@ class NIStreamer:
             nickname=nickname,
             proxy_class=proxy_class
         )
+
+    @property
+    def chunksize_ms(self) -> float:
+        return self._streamer.get_chunksize_ms()
+
+    @chunksize_ms.setter
+    def chunksize_ms(self, val: float):
+        self._streamer.set_chunksize_ms(val=val)
 
     @property
     def starts_last(self) -> Union[str, None]:
@@ -236,15 +245,25 @@ class StreamHandle:
     def launch_run(self, nreps=1):
         self._streamer.launch_run(nreps=nreps)
 
-    def wait_until_finished(self):
-        # ToDo: revise (double exception TimeoutError + KeyboardInterrupt)
-        #  Maybe return `True/False` from `wait_until_finished()` instead of timeout exception
-        while True:
-            try:
-                self._streamer.wait_until_finished(timeout=1.0)
-                break
-            except TimeoutError:
-                continue
+    def wait_until_finished(self, timeout: Optional[float] = None):
+        """There are two modes available depending on `timeout` value.
+
+        "Basic" mode - `timeout = None` (default).
+        Blocks until run is finished, but is interruptable with `KeyboardInterrupt`.
+        Returns `None` when run is finished.
+
+        "Advanced" mode - `timeout: float` - timeout in seconds.
+        Blocks and returns `True` when run is finished or `False` if timeout elapses.
+        This mode can be used together with `reps_written_count()` to implement a "progress bar".
+
+        If there is a stream error, this method raises `RuntimeError` in either mode.
+        """
+        if timeout is None:
+            while True:
+                if self._streamer.wait_until_finished(timeout=1.0):
+                    break
+        else:
+            return self._streamer.wait_until_finished(timeout=timeout)
 
     def request_stop(self):
         self._streamer.request_stop()
