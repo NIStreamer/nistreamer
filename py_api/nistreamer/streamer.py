@@ -203,7 +203,13 @@ class NIStreamer:
     def init_stream(self):
         return ContextManager(streamer=self._streamer)
 
-    def run(self, nreps: Optional[int] = 1, bufsize_ms: Optional[float] = 150) -> None:
+    def run(self, nlaunches: Optional[int] = 1, nreps: Optional[int] = 1):
+        with self.init_stream() as stream_handle:
+            for _ in range(nlaunches):
+                stream_handle.launch_run(nreps=nreps)
+                stream_handle.wait_until_finished()
+
+    def run_(self, nreps: Optional[int] = 1, bufsize_ms: Optional[float] = 150) -> None:
         try:
             self._streamer.cfg_run(bufsize_ms=bufsize_ms)
             for i in range(nreps):
