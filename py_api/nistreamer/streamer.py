@@ -26,9 +26,9 @@ class NIStreamer:
             f'DO cards: {list(self._do_cards.keys())}\n'
             f'\n'
             f'Hardware settings:\n'
-            f'\t   Chunk size (ms): {self.chunksize_ms}\n'
-            f'\t10MHz ref provider: {self.ref_clk_provider}\n'
-            f'\t  Starts-last card: {self.starts_last}'
+            f'\tCalc/write chunk size: {self.chunksize_ms} ms\n'
+            f'\t   10MHz ref provider: {self.ref_clk_provider}\n'
+            f'\t     Starts-last card: {self.starts_last}'
         )
 
         # # FixMe: TypeError: Object of type AOCard is not JSON serializable
@@ -203,11 +203,20 @@ class NIStreamer:
     def init_stream(self):
         return ContextManager(streamer=self._streamer)
 
-    def run(self, nlaunches: Optional[int] = 1, nreps: Optional[int] = 1):
+    def run(self, nreps: Optional[int] = 1):
         with self.init_stream() as stream_handle:
-            for _ in range(nlaunches):
-                stream_handle.launch_run(nreps=nreps)
-                stream_handle.wait_until_finished()
+            stream_handle.launch(nreps=nreps)
+            stream_handle.wait_until_finished()
+
+    def close_stream(self):
+        """You typically do not need to use this function at all
+        since context manager will automatically close the stream when exiting the context.
+
+        It is only exposed for the very rare case - a rapid succession of `KeyboardInterrupt` signals
+        may disrupt `__exit__()` logic and prevent automatic stream shutdown. Then stream can be closed
+        by calling this method or restarting the process.
+        """
+        return self._streamer.close_stream()
 
     def run_(self, nreps: Optional[int] = 1, bufsize_ms: Optional[float] = 150) -> None:
         try:
@@ -248,8 +257,8 @@ class StreamHandle:
     def __init__(self, streamer):
         self._streamer = streamer
 
-    def launch_run(self, nreps=1):
-        self._streamer.launch_run(nreps=nreps)
+    def launch(self, nreps=1):
+        self._streamer.launch(nreps=nreps)
 
     def wait_until_finished(self, timeout: Optional[float] = None):
         """There are two modes available depending on `timeout` value.
@@ -272,6 +281,13 @@ class StreamHandle:
             return self._streamer.wait_until_finished(timeout=timeout)
 
     def request_stop(self):
+        """You do not need to use this function in most cases - leaving `with` context
+        while stream is still running will automatically request the stop and will wait
+        until the stream cleanly finishes before returning.
+
+        This function is only exposed for possible advanced applications where you need
+        to break out of in-stream repetition loop and then want to re-launch the stream
+        again without spending extra time on redoing initialization."""
         self._streamer.request_stop()
 
     def reps_written_count(self):

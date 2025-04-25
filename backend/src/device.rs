@@ -379,7 +379,7 @@ pub trait RunControl: CommonHwCfg {
         self.fill_with_last_written_vals(&stream_bundle.ni_task, samp_bufs, stream_bundle.buf_size)?;
         self.write_to_hardware(stream_bundle, samp_bufs, stream_bundle.buf_size)?;
 
-        // - calculate the initial chunk for the next run launch while generation is finishing
+        // - calculate the initial chunk for the next launch while generation is finishing
         stream_bundle.counter.reset();
         let (start_pos, end_pos) = stream_bundle.counter.tick_next().unwrap();
         self.calc_samps(samp_bufs, start_pos, end_pos)?;

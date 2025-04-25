@@ -127,9 +127,9 @@ impl StreamerWrap {
             .map_err(|msg| PyValueError::new_err(msg))
     }
 
-    pub fn launch_run(&mut self, nreps: usize) -> PyResult<()> {
+    pub fn launch(&mut self, nreps: usize) -> PyResult<()> {
         self.inner
-            .launch_run(nreps)
+            .launch(nreps)
             .map_err(|msg| PyRuntimeError::new_err(msg))
     }
 

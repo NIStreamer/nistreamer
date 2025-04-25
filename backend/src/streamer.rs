@@ -349,7 +349,7 @@ impl Streamer {
         }
     }
 
-    pub fn launch_run(&mut self, nreps: usize) -> Result<(), String> {
+    pub fn launch(&mut self, nreps: usize) -> Result<(), String> {
         // (1) Status checks
         if self.stream_controls.is_none() {
             return Err("Stream is not initialized".to_string())
@@ -794,7 +794,7 @@ impl Streamer {
 
 impl Drop for Streamer {
     fn drop(&mut self) {
-        let res = self.close_run_();
+        let res = self.close_stream();
         if let Err(msg) = res {
             println!("Error when dropping NIStreamer: {msg}")
         };
