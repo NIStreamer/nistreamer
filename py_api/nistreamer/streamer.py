@@ -218,14 +218,6 @@ class NIStreamer:
         """
         return self._streamer.close_stream()
 
-    def run_(self, nreps: Optional[int] = 1, bufsize_ms: Optional[float] = 150) -> None:
-        try:
-            self._streamer.cfg_run(bufsize_ms=bufsize_ms)
-            for i in range(nreps):
-                self._streamer.stream_run(calc_next=(i < nreps - 1))
-        finally:
-            self._streamer.close_run()
-
     def add_reset_instr(self, reset_time: Optional[float] = None):
         self._streamer.add_reset_instr(reset_time=reset_time)
 
@@ -238,8 +230,8 @@ class NIStreamer:
 
 class ContextManager:
     """Using explicit context manager class instead of `contextlib.contextmanager` decorator
-    because it results in a shorter traceback from exceptions during `__enter__()`
-    (common cause - errors in `init_stream()` due to the user providing invalid settings)
+    because it results in a shorter traceback from exceptions during `__enter__()`.
+    This is important - users will see an exception any time `init_stream()` fails due to invalid user settings.
     """
 
     def __init__(self, streamer):

@@ -4,7 +4,7 @@
 
 use pyo3::prelude::*;
 use pyo3::PyResult;
-use pyo3::exceptions::{PyValueError, PyKeyError, PyRuntimeError, PyTimeoutError};
+use pyo3::exceptions::{PyValueError, PyKeyError, PyRuntimeError};
 
 use base_streamer::channel::BaseChan;
 use base_streamer::device::BaseDev;
@@ -156,27 +156,6 @@ impl StreamerWrap {
         self.inner
             .close_stream()
             .map_err(|msg| PyRuntimeError::new_err(msg))
-    }
-
-    pub fn cfg_run(&mut self, bufsize_ms: f64) -> PyResult<()> {
-        match self.inner.cfg_run_(bufsize_ms) {
-            Ok(()) => Ok(()),
-            Err(msg) => Err(PyValueError::new_err(msg)),
-        }
-    }
-
-    pub fn stream_run(&mut self, calc_next: bool, nreps: usize) -> PyResult<()> {
-        match self.inner.stream_run_(calc_next, nreps) {
-            Ok(()) => Ok(()),
-            Err(msg) => Err(PyRuntimeError::new_err(msg)),
-        }
-    }
-
-    pub fn close_run(&mut self) -> PyResult<()> {
-        match self.inner.close_run_() {
-            Ok(()) => Ok(()),
-            Err(msg) => Err(PyRuntimeError::new_err(msg)),
-        }
     }
     // endregion
 }

@@ -1130,7 +1130,7 @@ impl NIDev {
     pub fn worker_loop(
         &mut self,
         chunksize_ms: f64,
-        mut cmd_recvr: CmdRecvr,
+        cmd_recvr: CmdRecvr,
         report_sender: Sender<WorkerReport>,
         stop_flag: Arc<Mutex<bool>>,
         start_sync: StartSync,

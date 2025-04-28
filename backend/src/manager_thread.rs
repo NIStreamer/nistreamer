@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::thread;
 use std::thread::JoinHandle;
-use std::sync::{Arc};
+use std::sync::Arc;
 use std::sync::mpsc::{channel, Sender, Receiver, SendError, RecvError};
 use parking_lot::Mutex;
 use indexmap::IndexMap;
 
-use crate::device::{RunControl, NIDev, StartSync, WorkerReport, WorkerError};
+use crate::device::{NIDev, StartSync, WorkerReport, WorkerError};
 use crate::worker_cmd_chan::{CmdChan, WorkerCmd};
 
 pub enum ManagerCmd {
@@ -255,18 +255,6 @@ impl StreamManager {
         Ok(())
     }
 
-    /*
-    fn collect_worker_reports(&self) -> Result<(), ()> {
-        // Wait for each worker thread to report completion or stop working (by returning or panicking)
-        for (dev_name, recvr) in self.worker_report_recvrs.iter() {
-            match recvr.recv() {
-                Ok(()) => {},
-                Err(_err) => return Err(()),
-            };
-        };
-        Ok(())
-    }
-    */
     pub fn shut_down_all_workers(&mut self) -> Result<(), String> {
         // Command all workers to break out of any stream loops and return.
         *self.stop_flag.lock() = true;
