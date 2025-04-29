@@ -66,7 +66,7 @@ use crate::nidaqmx::DAQmxError;
 #[derive(Debug)]
 pub enum StreamStatus {
     Idle,
-    Running(Arc<Mutex<usize>>),  // "reps written" counter
+    Running,
 }
 
 pub struct StreamControls {
@@ -74,6 +74,7 @@ pub struct StreamControls {
     manager_cmd_sender: Sender<ManagerCmd>,
     manager_report_recvr: Receiver<()>,
     stop_requested: Arc<Mutex<bool>>,
+    reps_written_count: Arc<Mutex<usize>>,
     // Internal variable to remember stream state:
     status: StreamStatus,
 }
@@ -286,16 +287,19 @@ impl Streamer {
         let (report_sender, report_recvr) = channel::<()>();
         let stop_requested = Arc::new(Mutex::new(false));
         let stop_requested_clone = stop_requested.clone();
+        let reps_written_count = Arc::new(Mutex::new(0));
+        let reps_written_count_clone = reps_written_count.clone();
 
         // (3) Launch manager thread
         let chunksize_ms = self.chunksize_ms.clone();
         let spawn_result = thread::Builder::new()
             .name("Manager".to_string())
-            .spawn(move || {manager_loop(
+            .spawn(move || { manager_loop(
                 running_devs_clone,
                 cmd_recvr,
                 report_sender,
                 stop_requested_clone,
+                reps_written_count_clone,
                 starts_last_clone,
                 chunksize_ms,
             )});
@@ -312,6 +316,7 @@ impl Streamer {
             manager_cmd_sender: cmd_sender,
             manager_report_recvr: report_recvr,
             stop_requested,
+            reps_written_count,
             status: StreamStatus::Idle,
         });
 
@@ -348,19 +353,19 @@ impl Streamer {
         let controls = self.stream_controls.as_mut().unwrap();
         match controls.status {
             StreamStatus::Idle => { /* good to go */ },
-            StreamStatus::Running(_) => return Err("Stream is already running".to_string()),
+            StreamStatus::Running => return Err("Stream is already running".to_string()),
         }
 
-        // (2) Command manager to launch the run
+        // (2) Command `manager` thread to launch the run
         *controls.stop_requested.lock() = false;
-        let reps_written_count = Arc::new(Mutex::new(0));
+        *controls.reps_written_count.lock() = 0;
         let send_res = controls.manager_cmd_sender.send(
-            ManagerCmd::Launch(nreps, reps_written_count.clone())
+            ManagerCmd::Launch(nreps)
         );
 
         // (3) Handle the case the manager has quit already and return
         if send_res.is_ok() {
-            controls.status = StreamStatus::Running(reps_written_count);
+            controls.status = StreamStatus::Running;
             Ok(())
         } else {
             // Manager thread dropped its' side of the command channel - it must have quit due to an error.
@@ -370,16 +375,11 @@ impl Streamer {
     }
 
     pub fn request_stop(&self) -> Result<(), String> {
-        if self.stream_controls.is_none() {
-            return Err("Stream is not initialized".to_string())
-        }
-        let controls = self.stream_controls.as_ref().unwrap();
-        match controls.status {
-            StreamStatus::Running(_) => {
-                *controls.stop_requested.lock() = true;
-                Ok(())
-            },
-            StreamStatus::Idle => Ok(()),
+        if let Some(controls) = &self.stream_controls {
+            *controls.stop_requested.lock() = true;
+            Ok(())
+        } else {
+            Err("Stream is not initialized".to_string())
         }
     }
 
@@ -389,7 +389,7 @@ impl Streamer {
         };
         let controls = self.stream_controls.as_mut().unwrap();
         match controls.status {
-            StreamStatus::Running(_) => { /* Should wait. Moving further in logic */ },
+            StreamStatus::Running => { /* Should wait. Moving further in logic */ },
             StreamStatus::Idle => return Ok(true),  // Stream is idle, return immediately.
         }
 
@@ -423,13 +423,10 @@ impl Streamer {
     /// So this value should only be used as a coarse progress indicator for monitoring purposes only,
     /// it is not suitable as a sync mechanism.
     pub fn reps_written_count(&self) -> Result<usize, String> {
-        if self.stream_controls.is_none() {
-            return Err("Stream is not initialized".to_string())
-        }
-        let controls = self.stream_controls.as_ref().unwrap();
-        match &controls.status {
-            StreamStatus::Running(reps_written_count) => Ok(reps_written_count.lock().clone()),
-            StreamStatus::Idle => Err("Stream is not currently running".to_string())
+        if let Some(controls) = &self.stream_controls {
+            Ok(controls.reps_written_count.lock().clone())
+        } else {
+            Err("Stream is not initialized".to_string())
         }
     }
 

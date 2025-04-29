@@ -10,7 +10,7 @@ use crate::device::{NIDev, StartSync, WorkerReport, WorkerError};
 use crate::worker_cmd_chan::{CmdChan, WorkerCmd};
 
 pub enum ManagerCmd {
-    Launch(usize, Arc<Mutex<usize>>),  // `usize` - nreps, `Arc<Mutex<usize>>` - shared "reps written" counter
+    Launch(usize),  // `usize` - nreps
     Close,
 }
 
@@ -53,11 +53,12 @@ pub fn manager_loop(
     cmd_recvr: Receiver<ManagerCmd>,
     report_sender: Sender<()>,
     main_requested_stop: Arc<Mutex<bool>>,
+    reps_written_count: Arc<Mutex<usize>>,
     starts_last: Option<String>,
     chunksize_ms: f64,
 ) -> Result<(), String> {
     // Init
-    let mut manager = StreamManager::new_uninit(main_requested_stop);
+    let mut manager = StreamManager::new_uninit();
 
     // Convenience closure to simplify error handling
     // - using `?` operator will return immediately if an error occurs at any step.
@@ -67,8 +68,8 @@ pub fn manager_loop(
 
         loop {
             match cmd_recvr.recv()? {
-                ManagerCmd::Launch(nreps, reps_written_count) => {
-                    manager.run(nreps, reps_written_count)?;
+                ManagerCmd::Launch(nreps) => {
+                    manager.run(nreps, &main_requested_stop, &reps_written_count)?;
                     report_sender.send(())?;
                 },
                 ManagerCmd::Close => {
@@ -106,17 +107,15 @@ pub struct StreamManager {
     worker_cmd_chan: CmdChan,  // command broadcasting channel
     worker_report_recvrs: IndexMap<String, Receiver<WorkerReport>>,
     stop_flag: Arc<Mutex<bool>>,
-    main_requested_stop: Arc<Mutex<bool>>,
 }
 
 impl StreamManager {
-    pub fn new_uninit(main_requested_stop: Arc<Mutex<bool>>) -> Self {
+    pub fn new_uninit() -> Self {
         Self {
             worker_handles: IndexMap::new(),
             worker_cmd_chan: CmdChan::new(),
             worker_report_recvrs: IndexMap::new(),
             stop_flag: Arc::new(Mutex::new(false)),
-            main_requested_stop
         }
     }
 
@@ -195,7 +194,7 @@ impl StreamManager {
         Ok(())
     }
 
-    pub fn run(&self, nreps: usize, reps_written_count: Arc<Mutex<usize>>) -> Result<(), ManagerErr> {
+    pub fn run(&self, nreps: usize, main_requested_stop: &Arc<Mutex<bool>>, reps_written_count: &Arc<Mutex<usize>>) -> Result<(), ManagerErr> {
         // (1) Command all workers to start running
         *self.stop_flag.lock() = false;
         self.worker_cmd_chan.send(WorkerCmd::Run(nreps));
@@ -216,7 +215,7 @@ impl StreamManager {
             // Update "reps_written" counter
             *reps_written_count.lock() = rep_idx + 1;
             // Check if stop was requested by `main` thread
-            if *self.main_requested_stop.lock() {
+            if *main_requested_stop.lock() {
                 *self.stop_flag.lock() = true;
                 stopped_by_request = true;
                 break
