@@ -50,6 +50,7 @@ use std::thread::JoinHandle;
 use std::sync::Arc;
 use std::sync::mpsc::{Sender, Receiver, channel, RecvTimeoutError};
 use std::time::Duration;
+use std::collections::HashMap;
 
 use parking_lot::Mutex;
 use itertools::Itertools;
@@ -58,7 +59,9 @@ use indexmap::IndexMap;
 use base_streamer::device::BaseDev;
 use base_streamer::streamer::{TagBaseDev, BaseStreamer};
 
-use crate::device::{AODev, DODev, NIDev};
+use crate::device::{AODev, DODev, NIDev, StartSync};
+use crate::worker_cmd_chan::{CmdChan, WorkerCmd};
+use crate::drop_alarm::{new_drop_alarm, AlarmHandle};
 use crate::manager_thread::{manager_loop, ManagerCmd};
 use crate::nidaqmx;
 use crate::nidaqmx::DAQmxError;
@@ -75,6 +78,17 @@ pub struct StreamControls {
     manager_report_recvr: Receiver<()>,
     stop_requested: Arc<Mutex<bool>>,
     reps_written_count: Arc<Mutex<usize>>,
+    // Internal variable to remember stream state:
+    status: StreamStatus,
+}
+
+pub struct StreamControls_ {
+    worker_handles: IndexMap<String, JoinHandle<Result<(), String>>>,
+    worker_cmd_chan: CmdChan,
+    worker_report_recvrs: Vec<Receiver<()>>,
+    stop_flag: Arc<Mutex<bool>>,
+    drop_alarm: AlarmHandle,
+    reps_written_table: Vec<Arc<Mutex<usize>>>,
     // Internal variable to remember stream state:
     status: StreamStatus,
 }
@@ -107,6 +121,7 @@ pub struct Streamer {
     starts_last: Option<String>,  // Some(dev_name) or None
     // Stream manager controls
     stream_controls: Option<StreamControls>,
+    stream_controls_: Option<StreamControls_>,
 }
 
 impl BaseStreamer for Streamer {
@@ -157,6 +172,7 @@ impl Streamer {
             starts_last: None,  // Some(dev_name)
             // Stream manager controls
             stream_controls: None,
+            stream_controls_: None,
         }
     }
 
@@ -240,6 +256,82 @@ impl Streamer {
                 &format!("/{dev_name}/{term_name}")
             )?;
         };
+        Ok(())
+    }
+
+    pub fn init_stream_(&mut self) -> Result<(), String> {
+        // (1) Sanity checks
+        if self.stream_controls.is_some() {
+            return Err("There is already a stream initialized".to_string())
+        }
+
+        if !self.got_instructions() {
+            return Err("Streamer did not get any instructions".to_string())
+        }
+        self.validate_compile_cache()?;
+
+        let active_dev_names = self.active_dev_names();
+        if self.get_starts_last().is_some_and(|starts_last| !active_dev_names.contains(&starts_last)) {
+            return Err(format!(
+                "NIStreamer.starts_last is set to Some({}) but this name is not found in the active device list {active_dev_names:?}. \
+                Either the name is invalid or this device didn't get any instructions and will not run at all",
+                self.get_starts_last().unwrap()
+            ))
+        }
+
+        // (2) Export 10 MHz reference clock
+        /*
+            We are using static ref_clk export (as opposed to task-based export) to be able to always use
+            the same card as the reference clock source even if this card does not run this time.
+        */
+        self.export_ref_clk_().map_err(|daqmx_err| daqmx_err.to_string())?;
+
+        // (3) Transfer device objects to a separate IndexMap to wrap them into `Arc<Mutex<>>` for sharing with worker threads  // FixMe: this is a dirty hack.
+        for dev_name in active_dev_names {
+            let dev = self.devs.shift_remove(&dev_name).unwrap();
+            self.running_devs.insert(dev_name, Arc::new(Mutex::new(dev)));
+        }
+
+        // (4) Prepare worker control channels
+        let worker_cmd_chan = CmdChan::new();
+        let worker_report_recvrs = IndexMap::new();
+        let stop_flag = Arc::new(Mutex::new(false));
+        let mut alarm_handles = new_drop_alarm(self.running_devs.len() + 1);
+
+        // (5) Inter-worker start sync channels
+        let mut start_sync = HashMap::new();
+        if let Some(primary_dev_name) = &self.starts_last {
+            // Create and pack sender-receiver pairs
+            let mut recvr_vec = Vec::new();
+            // - first create all the secondaries
+            for dev_name in self.running_devs.keys().filter(|dev_name| dev_name.to_string() != primary_dev_name.clone()) {
+                let (sender, recvr) = channel::<()>();
+                recvr_vec.push(recvr);
+                start_sync.insert(
+                    dev_name.to_string(),
+                    StartSync::Secondary(sender)
+                );
+            }
+            // - now create the primary
+            start_sync.insert(
+                primary_dev_name.to_string(),
+                StartSync::Primary(recvr_vec)
+            );
+        } else {
+            for dev_name in self.running_devs.keys() {
+                start_sync.insert(
+                    dev_name.to_string(),
+                    StartSync::None,
+                );
+            }
+        }
+
+        // (6) Target duration of a single repetition - the longest compiled sequence duration among all running devs
+        let target_rep_dur = self.running_devs.values()
+            .map(|dev_mutex| dev_mutex.lock().compiled_stop_time())
+            .reduce(|longest_so_far, this| f64::max(longest_so_far, this))
+            .unwrap();
+
         Ok(())
     }
 
