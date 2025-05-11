@@ -87,7 +87,7 @@ pub struct StreamControls_ {
     worker_cmd_chan: CmdChan,
     worker_report_recvrs: Vec<Receiver<()>>,
     stop_flag: Arc<Mutex<bool>>,
-    // reps_written_table: Vec<Arc<Mutex<usize>>>, // ToDo
+    reps_written_table: IndexMap<String, Arc<Mutex<usize>>>,
     // Internal variable to remember stream state:
     status: StreamStatus,
 }
@@ -99,6 +99,7 @@ impl StreamControls_ {
             worker_cmd_chan: CmdChan::new(),
             worker_report_recvrs: Vec::new(),
             stop_flag: Arc::new(Mutex::new(false)),
+            reps_written_table: IndexMap::new(),
             status: StreamStatus::Idle,
         }
     }
@@ -400,6 +401,10 @@ impl Streamer {
                 // - retrieve start_sync
                 let worker_start_sync = start_sync.remove(&dev_name).unwrap();
 
+                // - reps written counter
+                let reps_written = Arc::new(Mutex::new(0));
+                stream_controls.reps_written_table.insert(dev_name.clone(), reps_written.clone());
+
                 // Launch worker thread
                 let stop_flag = stream_controls.stop_flag.clone();
                 let alarm_handle = alarm_handles.pop().unwrap();
@@ -408,7 +413,7 @@ impl Streamer {
                     .spawn(move || {
                         dev_container
                             .lock()
-                            .worker_loop(chunksize_ms, cmd_recvr, report_sender, alarm_handle, stop_flag, worker_start_sync, target_rep_dur)
+                            .worker_loop(chunksize_ms, cmd_recvr, report_sender, worker_start_sync, stop_flag, alarm_handle, reps_written, target_rep_dur)
                     }).map_err(|io_err| io_err.to_string())?;
                 stream_controls.worker_handles.insert(dev_name, join_handle);
             }
@@ -457,6 +462,7 @@ impl Streamer {
         }
         // (2) Command all workers to launch
         *controls.stop_flag.lock() = false;
+        controls.reps_written_table.values().for_each(|counter| *counter.lock() = 0);
         controls.worker_cmd_chan.send(WorkerCmd::Run(nreps));
         controls.status = StreamStatus::Running;
 
@@ -503,7 +509,7 @@ impl Streamer {
             controls.status = StreamStatus::Idle;
             Ok(true)
         } else {
-            let controls = self.stream_controls_.take().unwrap();
+            let controls = self.stream_controls_.take().unwrap();  // Also sets `self.stream_controls` to `None`
             let worker_report = controls.close_stream();
             self.undo_init_changes();
             if let Err(msg) = worker_report {
@@ -511,6 +517,28 @@ impl Streamer {
             } else {
                 Err("[BUG] some workers have quit unexpectedly yet none of the workers returned an error".to_string())
             }
+        }
+    }
+
+    /// Returns the number of waveform repetitions (per device) that all devices have fully sampled
+    /// and written into the onboard buffer already (some devices may have written more than that).
+    ///
+    /// **WARNING:** this number does not precisely reflect how many repetitions have been **generated out** already.
+    /// Samples are calculated and written to devices some time ahead of when they will actually be output
+    /// (this is necessary for stream stability). This function tracks how many has been _calculated and written_
+    /// rather than how many has been _actually output_.
+    ///
+    /// So this value should only be used as a coarse progress indicator for monitoring purposes only,
+    /// it is not suitable as a sync mechanism.
+    pub fn reps_written_count_(&self) -> Result<usize, String> {
+        if let Some(controls) = &self.stream_controls_ {
+            let lowest_count = controls.reps_written_table.values()
+                .map(|counter| counter.lock().clone())
+                .reduce(|lowest_so_far, this| usize::min(lowest_so_far, this))
+                .unwrap();
+            Ok(lowest_count)
+        } else {
+            Err("Stream is not initialized".to_string())
         }
     }
 

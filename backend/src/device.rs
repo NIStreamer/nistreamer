@@ -228,9 +228,10 @@ pub trait RunControl: CommonHwCfg {
         chunksize_ms: f64,
         mut cmd_recvr: CmdRecvr,
         report_sender: Sender<()>,
-        alarm_handle: DropAlarmHandle,
-        stop_flag: Arc<Mutex<bool>>,
         start_sync: StartSync,
+        stop_flag: Arc<Mutex<bool>>,
+        alarm_handle: DropAlarmHandle,
+        reps_written: Arc<Mutex<usize>>,
         target_rep_dur: f64,
     ) -> Result<(), WorkerError> {
         let (mut stream_bundle, mut samp_bufs) = self.init_stream(chunksize_ms, target_rep_dur)?;
@@ -239,7 +240,7 @@ pub trait RunControl: CommonHwCfg {
         loop {
             match cmd_recvr.recv()? {
                 WorkerCmd::Run(nreps) => {
-                    self.run(&mut stream_bundle, &mut samp_bufs, &alarm_handle, &stop_flag, &start_sync, nreps)?;
+                    self.run(nreps, &mut stream_bundle, &mut samp_bufs, &start_sync, &stop_flag, &alarm_handle, &reps_written)?;
                     report_sender.send(())?;
                 },
                 WorkerCmd::Close => {
@@ -290,12 +291,13 @@ pub trait RunControl: CommonHwCfg {
     }
     fn run(
         &mut self,
+        nreps: usize,
         stream_bundle: &mut StreamBundle,
         samp_bufs: &mut SampBufs,
-        alarm_handle: &DropAlarmHandle,
-        stop_flag: &Arc<Mutex<bool>>,
         start_sync: &StartSync,
-        nreps: usize,
+        stop_flag: &Arc<Mutex<bool>>,
+        alarm_handle: &DropAlarmHandle,
+        reps_written: &Arc<Mutex<usize>>
     ) -> Result<(), WorkerError> {
         // (1) Synchronise task start with other threads
         match start_sync {
@@ -355,13 +357,9 @@ pub trait RunControl: CommonHwCfg {
             }
 
             // Update rep count in the table
-            // ToDo
-            // Check if any peer workers have dropped
-            if alarm_handle.drop_detected() {
-                break
-            }
-            // Check if stop was requested
-            if *stop_flag.lock() {
+            *reps_written.lock() = rep_idx + 1;
+            // Check if stop was requested or any peer workers have dropped
+            if *stop_flag.lock() || alarm_handle.drop_detected() {
                 break
             }
         }
@@ -1131,14 +1129,15 @@ impl NIDev {
         chunksize_ms: f64,
         cmd_recvr: CmdRecvr,
         report_sender: Sender<()>,
-        alarm_handle: DropAlarmHandle,
-        stop_flag: Arc<Mutex<bool>>,
         start_sync: StartSync,
+        stop_flag: Arc<Mutex<bool>>,
+        alarm_handle: DropAlarmHandle,
+        reps_written: Arc<Mutex<usize>>,
         target_rep_dur: f64,
     ) -> Result<(), WorkerError> {
         match self {
-            NIDev::AO(dev) => dev.worker_loop(chunksize_ms, cmd_recvr, report_sender, alarm_handle, stop_flag, start_sync, target_rep_dur),
-            NIDev::DO(dev) => dev.worker_loop(chunksize_ms, cmd_recvr, report_sender, alarm_handle, stop_flag, start_sync, target_rep_dur),
+            NIDev::AO(dev) => dev.worker_loop(chunksize_ms, cmd_recvr, report_sender, start_sync, stop_flag, alarm_handle, reps_written, target_rep_dur),
+            NIDev::DO(dev) => dev.worker_loop(chunksize_ms, cmd_recvr, report_sender, start_sync, stop_flag, alarm_handle, reps_written, target_rep_dur),
         }
     }
 }
