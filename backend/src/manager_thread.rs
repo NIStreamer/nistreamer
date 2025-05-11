@@ -173,6 +173,7 @@ impl StreamManager {
 
             // Launch worker thread
             let stop_flag_clone = self.stop_flag.clone();
+            /*
             let handle = thread::Builder::new()
                 .name(dev_name.clone())
                 .spawn(move || {
@@ -181,6 +182,7 @@ impl StreamManager {
                         .worker_loop(chunksize_ms, cmd_recvr, report_sender, stop_flag_clone, worker_start_sync, target_rep_dur)
                 })?;
             self.worker_handles.insert(dev_name, handle);
+            */
         }
 
         // Wait for all workers to report init completion.

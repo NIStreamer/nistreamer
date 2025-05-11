@@ -59,9 +59,9 @@ use indexmap::IndexMap;
 use base_streamer::device::BaseDev;
 use base_streamer::streamer::{TagBaseDev, BaseStreamer};
 
-use crate::device::{AODev, DODev, NIDev, StartSync};
+use crate::device::{AODev, DODev, NIDev, StartSync, WorkerError};
 use crate::worker_cmd_chan::{CmdChan, WorkerCmd};
-use crate::drop_alarm::{new_drop_alarm, AlarmHandle};
+use crate::drop_alarm::{new_drop_alarm, DropAlarmHandle};
 use crate::manager_thread::{manager_loop, ManagerCmd};
 use crate::nidaqmx;
 use crate::nidaqmx::DAQmxError;
@@ -83,14 +83,64 @@ pub struct StreamControls {
 }
 
 pub struct StreamControls_ {
-    worker_handles: IndexMap<String, JoinHandle<Result<(), String>>>,
+    worker_handles: IndexMap<String, JoinHandle<Result<(), WorkerError>>>,
     worker_cmd_chan: CmdChan,
     worker_report_recvrs: Vec<Receiver<()>>,
     stop_flag: Arc<Mutex<bool>>,
-    drop_alarm: AlarmHandle,
-    reps_written_table: Vec<Arc<Mutex<usize>>>,
+    // reps_written_table: Vec<Arc<Mutex<usize>>>, // ToDo
     // Internal variable to remember stream state:
     status: StreamStatus,
+}
+
+impl StreamControls_ {
+    pub fn new() -> Self {
+        Self {
+            worker_handles: IndexMap::new(),
+            worker_cmd_chan: CmdChan::new(),
+            worker_report_recvrs: Vec::new(),
+            stop_flag: Arc::new(Mutex::new(false)),
+            status: StreamStatus::Idle,
+        }
+    }
+
+    pub fn close_stream(mut self) -> Result<(), String> {
+        // Command all workers to break out of in-stream loops and return.
+        *self.stop_flag.lock() = true;
+        self.worker_cmd_chan.send(WorkerCmd::Close);
+        /*
+            After that, any still-running worker will eventually return no matter what state it was in.
+            Plus any failed ones have quit already by either returning an Err or panicking.
+            So joining all handles should not lead to a deadlock.
+        */
+
+        // Join all worker threads. Collect all error messages, if any.
+        let mut err_msgs = IndexMap::new();
+        for (name, handle) in self.worker_handles.drain(..) {
+            match handle.join() {
+                Ok(res) => { match res {
+                    Ok(()) => { /* Worker returned without errors */ }
+                    Err(msg) => {
+                        /* Worker gracefully returned an error */
+                        err_msgs.insert(name, msg.to_string());
+                    }
+                }},
+                Err(panic_obj) => {
+                    /* Worker has panicked */
+                    err_msgs.insert(name, format!("Panic message: {:?}", panic_obj));
+                }
+            }
+        }
+        // Return:
+        if err_msgs.is_empty() {
+            Ok(())
+        } else {
+            let mut joint_err_msg = String::new();
+            for (name, msg) in err_msgs {
+                joint_err_msg.push_str(&format!("[{name}] {msg}\n\n"))
+            }
+            Err(joint_err_msg)
+        }
+    }
 }
 
 /// An extended version of the [`nicompiler_backend::Experiment`] struct, tailored to provide direct
@@ -261,7 +311,7 @@ impl Streamer {
 
     pub fn init_stream_(&mut self) -> Result<(), String> {
         // (1) Sanity checks
-        if self.stream_controls.is_some() {
+        if self.stream_controls_.is_some() {
             return Err("There is already a stream initialized".to_string())
         }
 
@@ -291,14 +341,25 @@ impl Streamer {
             let dev = self.devs.shift_remove(&dev_name).unwrap();
             self.running_devs.insert(dev_name, Arc::new(Mutex::new(dev)));
         }
+        let mut running_dev_clones = IndexMap::new();
+        for (name, dev_container) in self.running_devs.iter() {
+            running_dev_clones.insert(name.to_string(), dev_container.clone());
+        };
+
+        // (6) Target duration of a single repetition - the longest compiled sequence duration among all running devs
+        let target_rep_dur = self.running_devs.values()
+            .map(|dev_mutex| dev_mutex.lock().compiled_stop_time())
+            .reduce(|longest_so_far, this| f64::max(longest_so_far, this))
+            .unwrap();
+        let chunksize_ms = self.get_chunksize_ms();
 
         // (4) Prepare worker control channels
-        let worker_cmd_chan = CmdChan::new();
-        let worker_report_recvrs = IndexMap::new();
-        let stop_flag = Arc::new(Mutex::new(false));
-        let mut alarm_handles = new_drop_alarm(self.running_devs.len() + 1);
+        let mut stream_controls = StreamControls_::new();
 
-        // (5) Inter-worker start sync channels
+        // (5) Drop alarm
+        let mut alarm_handles = new_drop_alarm(self.running_devs.len());
+
+        // (6) Inter-worker start sync channels
         let mut start_sync = HashMap::new();
         if let Some(primary_dev_name) = &self.starts_last {
             // Create and pack sender-receiver pairs
@@ -326,13 +387,131 @@ impl Streamer {
             }
         }
 
-        // (6) Target duration of a single repetition - the longest compiled sequence duration among all running devs
-        let target_rep_dur = self.running_devs.values()
-            .map(|dev_mutex| dev_mutex.lock().compiled_stop_time())
-            .reduce(|longest_so_far, this| f64::max(longest_so_far, this))
-            .unwrap();
+        let mut catch_closure = || -> Result<(), String> {
+            // Prepare a few more individual worker controls and launch worker threads
+            for (dev_name, dev_container) in running_dev_clones.drain(..) {
+                // - command receiver for this worker
+                let cmd_recvr = stream_controls.worker_cmd_chan.new_recvr();
+
+                // - report channel for this worker
+                let (report_sender, report_recvr) = channel::<()>();
+                stream_controls.worker_report_recvrs.push(report_recvr);
+
+                // - retrieve start_sync
+                let worker_start_sync = start_sync.remove(&dev_name).unwrap();
+
+                // Launch worker thread
+                let stop_flag = stream_controls.stop_flag.clone();
+                let alarm_handle = alarm_handles.pop().unwrap();
+                let join_handle = thread::Builder::new()
+                    .name(dev_name.clone())
+                    .spawn(move || {
+                        dev_container
+                            .lock()
+                            .worker_loop(chunksize_ms, cmd_recvr, report_sender, alarm_handle, stop_flag, worker_start_sync, target_rep_dur)
+                    }).map_err(|io_err| io_err.to_string())?;
+                stream_controls.worker_handles.insert(dev_name, join_handle);
+            }
+
+            // Wait for all workers to report init completion.
+            // If any worker had an error/panic, it will be visible as `Err` on trying to receive the report.
+            for recvr in stream_controls.worker_report_recvrs.iter() {
+                recvr.recv().map_err(|e| e.to_string())?
+            };
+            Ok(())
+        };
+
+        match catch_closure() {
+            Ok(()) => {
+                self.stream_controls_ = Some(stream_controls);
+                Ok(())
+            },
+            Err(closure_msg) => {
+                // Shut down stream, undo init changes
+                let worker_report = stream_controls.close_stream();
+                self.undo_init_changes();
+                // Return the error
+                if let Err(worker_err) = worker_report {
+                    // Usual case - some workers failed. Main info is contained in `worker_report`
+                    // `closure_msg` is not very useful here - just print it to the console.
+                    println!("{closure_msg}");
+                    Err(worker_err)
+                } else {
+                    // Unusual case - `catch_closure()` returned an `Err`, but all workers reported `Ok`
+                    // Most likely OS failed to launch a thread. The info is contained in `closure_msg`
+                    Err(closure_msg)
+                }
+            }
+        }
+    }
+
+    pub fn launch_(&mut self, nreps: usize) -> Result<(), String> {
+        // (1) Status checks
+        if self.stream_controls_.is_none() {
+            return Err("Stream is not initialized".to_string())
+        }
+        let controls = self.stream_controls_.as_mut().unwrap();
+        match controls.status {
+            StreamStatus::Idle => { /* good to go */ },
+            StreamStatus::Running => return Err("Stream is already running".to_string()),
+        }
+        // (2) Command all workers to launch
+        *controls.stop_flag.lock() = false;
+        controls.worker_cmd_chan.send(WorkerCmd::Run(nreps));
+        controls.status = StreamStatus::Running;
 
         Ok(())
+    }
+
+    pub fn request_stop_(&self) -> Result<(), String> {
+        if let Some(controls) = &self.stream_controls_ {
+            *controls.stop_flag.lock() = true;
+            Ok(())
+        } else {
+            Err("Stream is not initialized".to_string())
+        }
+    }
+
+    pub fn wait_until_finished_(&mut self, timeout: Duration) -> Result<bool, String> {
+        if self.stream_controls_.is_none() {
+            return Err("Stream is not initialized".to_string())
+        };
+        let controls = self.stream_controls_.as_mut().unwrap();
+        match controls.status {
+            StreamStatus::Running => { /* Should wait. Moving further in logic */ },
+            StreamStatus::Idle => return Ok(true),  // Stream is idle, return immediately.
+        }
+
+        // To begin, try to receive the report from the first worker using `recv_timeout()`.
+        // Act depending on this first return:
+        // * Timeout - the first worker is still busy and no peer drop was detected so far - return timeout;
+        // * Disconnected - proceed to closing stream;
+        // * Reported completion - other workers should be finishing soon as well.
+        //                         Wait for them to report without timeout limit.
+        let mut failed = false;
+        match controls.worker_report_recvrs.first().unwrap().recv_timeout(timeout) {
+            Err(RecvTimeoutError::Timeout) => return Ok(false),
+            Err(RecvTimeoutError::Disconnected) => { failed = true },
+            Ok(()) => {
+                failed = controls.worker_report_recvrs[1..]
+                    .iter()
+                    .any(|recvr| recvr.recv().is_err());
+            },
+        };
+
+        if !failed {
+            controls.status = StreamStatus::Idle;
+            Ok(true)
+        } else {
+            let controls = self.stream_controls_.take().unwrap();
+            let worker_report = controls.close_stream();
+            self.undo_init_changes();
+            if let Err(msg) = worker_report {
+                Err(msg)
+            } else {
+                Err("[BUG] some workers have quit unexpectedly yet none of the workers returned an error".to_string())
+            }
+        }
     }
 
     pub fn init_stream(&mut self) -> Result<(), String> {
