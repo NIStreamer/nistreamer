@@ -64,7 +64,6 @@ use crate::worker_cmd_chan::{CmdChan, WorkerCmd};
 use crate::drop_alarm::{new_drop_alarm, DropAlarmHandle};
 use crate::manager_thread::{manager_loop, ManagerCmd};
 use crate::nidaqmx;
-use crate::nidaqmx::DAQmxError;
 
 #[derive(Debug)]
 pub enum StreamStatus {
@@ -290,24 +289,26 @@ impl Streamer {
         self.ref_clk_provider = provider;
     }
 
-    fn export_ref_clk_(&mut self) -> Result<(), DAQmxError> {
+    fn export_ref_clk_(&mut self) -> Result<(), String> {
         if let Some((dev_name, term_name)) = &self.ref_clk_provider {
-            // ToDo: Try tristating the terminal on all other cards in the streamer to ensure the line is not driven
+            // ToDo: Maybe try tristating the terminal on all other cards in the streamer to ensure the line is not driven
             nidaqmx::connect_terms(
                 &format!("/{dev_name}/10MHzRefClock"),
                 &format!("/{dev_name}/{term_name}")
-            )?;
-        };
-        Ok(())
+            ).map_err(|e| e.to_string())
+        } else {
+            Ok(())
+        }
     }
-    pub fn undo_export_ref_clk_(&mut self) -> Result<(), DAQmxError> {
+    pub fn undo_export_ref_clk_(&mut self) -> Result<(), String> {
         if let Some((dev_name, term_name)) = &self.ref_clk_provider {
             nidaqmx::disconnect_terms(
                 &format!("/{dev_name}/10MHzRefClock"),
                 &format!("/{dev_name}/{term_name}")
-            )?;
-        };
-        Ok(())
+            ).map_err(|e| e.to_string())
+        } else {
+            Ok(())
+        }
     }
 
     pub fn init_stream_(&mut self) -> Result<(), String> {
@@ -330,37 +331,39 @@ impl Streamer {
             ))
         }
 
-        // (2) Export 10 MHz reference clock
+        // (2) Starting this point we begin making changes which will need to be reverted when closing the stream or if init fails
+
+        // Export 10 MHz reference clock
         /*
             We are using static ref_clk export (as opposed to task-based export) to be able to always use
             the same card as the reference clock source even if this card does not run this time.
         */
-        self.export_ref_clk_().map_err(|daqmx_err| daqmx_err.to_string())?;
+        self.export_ref_clk_()?;
 
-        // (3) Transfer device objects to a separate IndexMap to wrap them into `Arc<Mutex<>>` for sharing with worker threads  // FixMe: this is a dirty hack.
-        for dev_name in active_dev_names {
-            let dev = self.devs.shift_remove(&dev_name).unwrap();
-            self.running_devs.insert(dev_name, Arc::new(Mutex::new(dev)));
+        // Transfer device objects to a separate IndexMap to wrap them into `Arc<Mutex<>>` for sharing with worker threads  // FixMe: this is a dirty hack.
+        for name in active_dev_names {
+            let dev = self.devs.shift_remove(&name).unwrap();
+            self.running_devs.insert(name, Arc::new(Mutex::new(dev)));
         }
         let mut running_dev_clones = IndexMap::new();
         for (name, dev_container) in self.running_devs.iter() {
             running_dev_clones.insert(name.to_string(), dev_container.clone());
         };
 
-        // (6) Target duration of a single repetition - the longest compiled sequence duration among all running devs
+        // Target duration of a single repetition - the longest compiled sequence duration among all running devs
         let target_rep_dur = self.running_devs.values()
             .map(|dev_mutex| dev_mutex.lock().compiled_stop_time())
             .reduce(|longest_so_far, this| f64::max(longest_so_far, this))
             .unwrap();
         let chunksize_ms = self.get_chunksize_ms();
 
-        // (4) Prepare worker control channels
+        // New stream controls instance
         let mut stream_controls = StreamControls_::new();
 
-        // (5) Drop alarm
+        // Drop alarm
         let mut alarm_handles = new_drop_alarm(self.running_devs.len());
 
-        // (6) Inter-worker start sync channels
+        // Inter-worker start sync channels
         let mut start_sync = HashMap::new();
         if let Some(primary_dev_name) = &self.starts_last {
             // Create and pack sender-receiver pairs
@@ -388,64 +391,64 @@ impl Streamer {
             }
         }
 
-        let mut catch_closure = || -> Result<(), String> {
-            // Prepare a few more individual worker controls and launch worker threads
-            for (dev_name, dev_container) in running_dev_clones.drain(..) {
-                // - command receiver for this worker
-                let cmd_recvr = stream_controls.worker_cmd_chan.new_recvr();
+        // For each worker, prepare a few more individual controls and launch the thread
+        let mut spawn_result: Result<(), String> = Ok(());
+        for (dev_name, dev_container) in running_dev_clones.drain(..) {
+            // - command receiver for this worker
+            let cmd_recvr = stream_controls.worker_cmd_chan.new_recvr();
 
-                // - report channel for this worker
-                let (report_sender, report_recvr) = channel::<()>();
-                stream_controls.worker_report_recvrs.push(report_recvr);
+            // - report channel for this worker
+            let (report_sender, report_recvr) = channel::<()>();
+            stream_controls.worker_report_recvrs.push(report_recvr);
 
-                // - retrieve start_sync
-                let worker_start_sync = start_sync.remove(&dev_name).unwrap();
+            // - retrieve start_sync
+            let worker_start_sync = start_sync.remove(&dev_name).unwrap();
 
-                // - reps written counter
-                let reps_written = Arc::new(Mutex::new(0));
-                stream_controls.reps_written_table.insert(dev_name.clone(), reps_written.clone());
+            let stop_flag = stream_controls.stop_flag.clone();
+            let alarm_handle = alarm_handles.pop().unwrap();
 
-                // Launch worker thread
-                let stop_flag = stream_controls.stop_flag.clone();
-                let alarm_handle = alarm_handles.pop().unwrap();
-                let join_handle = thread::Builder::new()
-                    .name(dev_name.clone())
-                    .spawn(move || {
-                        dev_container
-                            .lock()
-                            .worker_loop(chunksize_ms, cmd_recvr, report_sender, worker_start_sync, stop_flag, alarm_handle, reps_written, target_rep_dur)
-                    }).map_err(|io_err| io_err.to_string())?;
-                stream_controls.worker_handles.insert(dev_name, join_handle);
+            // - reps written counter
+            let reps_written = Arc::new(Mutex::new(0));
+            stream_controls.reps_written_table.insert(dev_name.clone(), reps_written.clone());
+
+            // Launch worker thread
+            let res = thread::Builder::new()
+                .name(dev_name.clone())
+                .spawn(move || {
+                    dev_container
+                        .lock()
+                        .worker_loop(chunksize_ms, cmd_recvr, report_sender, worker_start_sync, stop_flag, alarm_handle, reps_written, target_rep_dur)
+                });
+            match res {
+                Ok(join_handle) => { stream_controls.worker_handles.insert(dev_name, join_handle); },
+                Err(io_err) => {
+                    spawn_result = Err(io_err.to_string());
+                    break
+                },
             }
+        }
+        if let Err(spawn_msg) = spawn_result {
+            let worker_report = stream_controls.close_stream();
+            self.undo_init_changes();
+            return Err(format!("Thread spawn failed: {spawn_msg}. In addition, joint report from all spawned workers (all were shut down): {worker_report:?}"))
+        }
 
-            // Wait for all workers to report init completion.
-            // If any worker had an error/panic, it will be visible as `Err` on trying to receive the report.
-            for recvr in stream_controls.worker_report_recvrs.iter() {
-                recvr.recv().map_err(|e| e.to_string())?
-            };
+        // (3) Wait for all workers to report init completion and then return.
+        // If anyone fails (error/panic), it will be visible as `Err` on trying to receive the report.
+        let all_completed = stream_controls.worker_report_recvrs
+            .iter()
+            .all(|recvr| recvr.recv().is_ok());
+
+        if all_completed {
+            self.stream_controls_ = Some(stream_controls);
             Ok(())
-        };
-
-        match catch_closure() {
-            Ok(()) => {
-                self.stream_controls_ = Some(stream_controls);
-                Ok(())
-            },
-            Err(closure_msg) => {
-                // Shut down stream, undo init changes
-                let worker_report = stream_controls.close_stream();
-                self.undo_init_changes();
-                // Return the error
-                if let Err(worker_err) = worker_report {
-                    // Usual case - some workers failed. Main info is contained in `worker_report`
-                    // `closure_msg` is not very useful here - just print it to the console.
-                    println!("{closure_msg}");
-                    Err(worker_err)
-                } else {
-                    // Unusual case - `catch_closure()` returned an `Err`, but all workers reported `Ok`
-                    // Most likely OS failed to launch a thread. The info is contained in `closure_msg`
-                    Err(closure_msg)
-                }
+        } else {
+            let worker_report = stream_controls.close_stream();
+            self.undo_init_changes();
+            if let Err(msg) = worker_report {
+                Err(msg)
+            } else {
+                Err("[BUG] Some workers have quit unexpectedly at init, yet no worker reported an error".to_string())
             }
         }
     }
