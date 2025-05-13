@@ -515,7 +515,7 @@ impl Streamer {
             if let Err(msg) = worker_report {
                 Err(msg)
             } else {
-                Err("[BUG] some workers have quit unexpectedly yet none of the workers returned an error".to_string())
+                Err("[BUG] some workers have quit unexpectedly yet all workers returned Ok".to_string())
             }
         }
     }
@@ -539,6 +539,17 @@ impl Streamer {
             Ok(lowest_count)
         } else {
             Err("Stream is not initialized".to_string())
+        }
+    }
+
+    pub fn close_stream_(&mut self) -> Result<(), String> {
+        if self.stream_controls_.is_none() {
+            Ok(())
+        } else {
+            let controls = self.stream_controls_.take().unwrap();  // Also sets `self.stream_controls` to `None`
+            let worker_report = controls.close_stream();
+            self.undo_init_changes();
+            worker_report
         }
     }
 
