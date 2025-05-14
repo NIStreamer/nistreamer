@@ -241,6 +241,9 @@ pub trait RunControl: CommonHwCfg {
             match cmd_recvr.recv()? {
                 WorkerCmd::Run(nreps) => {
                     self.run(nreps, &mut stream_bundle, &mut samp_bufs, &start_sync, &stop_flag, &alarm_handle, &reps_written)?;
+                    if alarm_handle.drop_detected() {
+                        break
+                    };
                     report_sender.send(())?;
                 },
                 WorkerCmd::Close => {
