@@ -480,24 +480,26 @@ impl Streamer {
             StreamStatus::Idle => return Ok(true),  // Stream is idle, return immediately.
         }
 
-        // To begin, try to receive the report from the first worker using `recv_timeout()`.
-        // Act depending on this first return:
-        // * Timeout - the first worker is still busy and no peer drop was detected so far - return timeout;
-        // * Disconnected - proceed to closing stream;
-        // * Reported completion - other workers should be finishing soon as well.
-        //                         Wait for them to report without timeout limit.
-        let mut failed = false;
-        match controls.worker_report_recvrs.first().unwrap().recv_timeout(timeout) {
+        /* A two-step approach:
+        (1) Try to receive the report from the first worker using `recv_timeout()`;
+        (2) Then act depending on this first return:
+            * Timeout - the first worker is still busy and no peer drop was detected so far - return timeout;
+            * Disconnected - proceed to closing stream;
+            * Reported completion - other workers should be finishing soon as well.
+                                    Wait for them to report without timeout limit.
+        */
+        let first_recvr = controls.worker_report_recvrs.first().unwrap();
+        let all_completed = match first_recvr.recv_timeout(timeout) {
             Err(RecvTimeoutError::Timeout) => return Ok(false),
-            Err(RecvTimeoutError::Disconnected) => { failed = true },
+            Err(RecvTimeoutError::Disconnected) => false,
             Ok(()) => {
-                failed = controls.worker_report_recvrs[1..]
+                controls.worker_report_recvrs[1..]
                     .iter()
-                    .any(|recvr| recvr.recv().is_err());
+                    .all(|recvr| recvr.recv().is_ok())
             },
         };
 
-        if !failed {
+        if all_completed {
             controls.status = StreamStatus::Idle;
             Ok(true)
         } else {
