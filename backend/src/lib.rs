@@ -128,7 +128,6 @@ pub mod channel;
 pub mod device;
 pub mod streamer;
 pub mod drop_alarm;
-pub mod manager_thread;
 pub mod utils;
 pub mod worker_cmd_chan;
 pub mod flat_wrap;
