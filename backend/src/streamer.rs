@@ -106,16 +106,23 @@ impl StreamControls {
         let mut err_msgs = IndexMap::new();
         for (name, handle) in self.worker_handles.drain(..) {
             match handle.join() {
-                Ok(res) => { match res {
+                Ok(res) => match res {
                     Ok(()) => { /* Worker returned without errors */ }
                     Err(msg) => {
                         /* Worker gracefully returned an error */
                         err_msgs.insert(name, msg.to_string());
                     }
-                }},
+                },
                 Err(panic_obj) => {
                     /* Worker has panicked */
-                    err_msgs.insert(name, format!("Panic message: {:?}", panic_obj));
+                    let msg = match panic_obj.downcast_ref::<&'static str>() {
+                        Some(msg) => *msg,
+                        None => match panic_obj.downcast_ref::<String>() {
+                            Some(msg) => &msg[..],
+                            None => "Unknown panic payload type",
+                        },
+                    };
+                    err_msgs.insert(name, format!("Panic message: {msg}"));
                 }
             }
         }
@@ -489,7 +496,7 @@ impl Streamer {
                                     Wait for them to report without timeout limit.
         */
         let first_recvr = controls.worker_report_recvrs.first().unwrap();
-        let all_completed = match first_recvr.recv_timeout(timeout) {
+        let all_reported_ok = match first_recvr.recv_timeout(timeout) {
             Err(RecvTimeoutError::Timeout) => return Ok(false),
             Err(RecvTimeoutError::Disconnected) => false,
             Ok(()) => {
@@ -499,7 +506,7 @@ impl Streamer {
             },
         };
 
-        if all_completed {
+        if all_reported_ok {
             controls.status = StreamStatus::Idle;
             Ok(true)
         } else {
@@ -551,14 +558,18 @@ impl Streamer {
 
     fn undo_init_changes(&mut self) {
         // Undo 10 MHz reference export
-        /* This method is meant to be called after `Self::export_ref_clk_()` was called and succeeded.
-           If exporting clock had no errors, `dev_name` and `term_name` should be correct
-           and we do not expect this call to fail. */
+        /*
+            This method is meant to be called after `Self::export_ref_clk_()` was called and succeeded.
+            If exporting clock had no errors, `dev_name` and `term_name` should be correct
+            and we do not expect this call to fail.
+        */
         self.undo_export_ref_clk_().unwrap();
 
         // Return all active device objects back to the main IndexMap
-        /* This method is meant to be called after `manager` thread was joined so all workers
-           must have returned and dropped their clones of `Arc<Mutex<dev>>` earlier. */
+        /*
+            This method is meant to be called after all worker threads were joined so all workers
+            must have already returned and dropped their clones of `Arc<Mutex<dev>>`.
+        */
         for (dev_name, dev_box) in self.running_devs.drain(..) {
             let dev = Arc::into_inner(dev_box).unwrap().into_inner();
             self.devs.insert(dev_name, dev);
