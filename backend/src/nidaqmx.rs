@@ -93,6 +93,7 @@ pub const DAQMX_VAL_STARTTRIGGER: CInt32 = 12491;
 pub const DAQMX_VAL_SAMPLECLOCK: CInt32 = 12487;
 pub const DAQMX_VAL_10MHZREFCLOCK: CInt32 = 12536;
 pub const DAQMX_VAL_DO_NOT_INVERT_POLARITY: CInt32 = 0;
+pub const DAQMX_VAL_TASK_VERIFY: CInt32 = 2;
 
 #[link(name = "NIDAQmx")]
 extern "C" {
@@ -167,6 +168,8 @@ extern "C" {
     fn DAQmxConnectTerms(sourceTerminal: CConstStr, destinationTerminal: CConstStr, signalModifiers: CInt32) -> CInt32;
     fn DAQmxDisconnectTerms(sourceTerminal: CConstStr, destinationTerminal: CConstStr) -> CInt32;
     fn DAQmxExportSignal(handle: TaskHandle, signalID: CInt32, outputTerminal: CConstStr) -> CInt32;
+    fn DAQmxSetSampQuantSampMode(handle: TaskHandle, data: CInt32) -> CInt32;
+    fn DAQmxSetSampQuantSampPerChan(handle: TaskHandle, data: CUint64) -> CInt32;
     fn DAQmxSetRefClkSrc(handle: TaskHandle, src: CConstStr) -> CInt32;
     fn DAQmxSetRefClkRate(handle: TaskHandle, rate: CFloat64) -> CInt32;
     fn DAQmxCfgDigEdgeStartTrig(
@@ -176,6 +179,7 @@ extern "C" {
     ) -> CInt32;
     fn DAQmxGetWriteCurrWritePos(handle: TaskHandle, data: *mut CUint64) -> CInt32;
     fn DAQmxGetWriteTotalSampPerChanGenerated(handle: TaskHandle, data: *mut CUint64) -> CInt32;
+    fn DAQmxTaskControl(handle: TaskHandle, action: CInt32) -> CInt32;
 }
 
 #[derive(Clone, Debug)]
@@ -396,6 +400,24 @@ impl NiTask {
         })
     }
 
+    pub fn switch_to_finite_samps_mode(&self) -> Result<(), DAQmxError> {
+        daqmx_call(|| unsafe {
+            DAQmxSetSampQuantSampMode(self.handle, DAQMX_VAL_FINITESAMPS)
+        })
+    }
+
+    pub fn switch_to_cont_samps_mode(&self) -> Result<(), DAQmxError> {
+        daqmx_call(|| unsafe {
+            DAQmxSetSampQuantSampMode(self.handle, DAQMX_VAL_CONTSAMPS)
+        })
+    }
+
+    pub fn set_samp_num_per_chan(&self, val: usize) -> Result<(), DAQmxError> {
+        daqmx_call(|| unsafe {
+            DAQmxSetSampQuantSampPerChan(self.handle, val as CUint64)
+        })
+    }
+
     pub fn cfg_output_buf(&self, buf_size: usize) -> Result<(), DAQmxError> {
         daqmx_call(|| unsafe { DAQmxCfgOutputBuffer(self.handle, buf_size as CUint32) })
     }
@@ -564,6 +586,12 @@ impl NiTask {
         let output_terminal_cstr = std::ffi::CString::new(output_terminal)?;
         daqmx_call(|| unsafe {
             DAQmxExportSignal(self.handle, signal_id, output_terminal_cstr.as_ptr())
+        })
+    }
+
+    pub fn verify_settings(&self) -> Result<(), DAQmxError> {
+        daqmx_call(|| unsafe {
+            DAQmxTaskControl(self.handle, DAQMX_VAL_TASK_VERIFY)
         })
     }
 

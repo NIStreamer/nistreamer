@@ -48,6 +48,8 @@ use crate::worker_cmd_chan::{CmdRecvr, WorkerCmd};
 use crate::drop_alarm::DropAlarmHandle;
 use crate::nidaqmx::*;
 
+pub const LEGACY_32BIT_LIM: usize = usize::pow(2, 32);
+
 pub enum StartSync {
     Primary(Vec<Receiver<()>>),
     Secondary(Sender<()>),
@@ -98,7 +100,7 @@ pub struct StreamBundle {
     ni_task: NiTask,
     counter: StreamCounter,
     total_written: u64,
-    buf_size: usize,
+    chunk_size: usize,
     buf_write_timeout: Option<f64>,  // Some(finite_timeout_in_seconds) or None - wait infinitely
     target_rep_dur: f64,
 }
@@ -255,16 +257,20 @@ pub trait RunControl: CommonHwCfg {
     }
     fn init_stream(&mut self, chunksize_ms: f64, target_rep_dur: f64) -> Result<(StreamBundle, SampBufs), WorkerError> {
         let chunk_dur = chunksize_ms / 1000.0;
+        let chunk_size = (chunk_dur * self.samp_rate()).round() as usize;
         let buf_write_timeout = match &self.hw_cfg().min_bufwrite_timeout {
             Some(min_timeout) => Some(f64::max(10.0*chunk_dur, *min_timeout)),
             None => None,
         };
 
         let seq_len = self.total_samps();
-        let buf_size = std::cmp::min(
-            seq_len,
-            (chunk_dur * self.samp_rate()).round() as usize,
-        );
+        // Determine buffer size to allocate
+        let must_use_soft_stop = self.total_samps() > LEGACY_32BIT_LIM;
+        let buf_size = if must_use_soft_stop {
+            chunk_size
+        } else {
+            std::cmp::min(seq_len, chunk_size)
+        };
         let mut samp_buf = self.alloc_samp_bufs(buf_size);
         let counter = StreamCounter::new(seq_len, buf_size);
 
@@ -274,13 +280,14 @@ pub trait RunControl: CommonHwCfg {
         task.cfg_output_buf((buf_size as f64 * 1.2) as usize)?;  // NI buffer is slightly larger than buf_size to save time for sample calc between reps with soft-stop approach
         task.disallow_regen()?;
         self.cfg_clk_sync(&task)?;
+        task.verify_settings()?;
 
         // Bundle NiTask, StreamCounter, and buf_write_timeout together for convenience:
         let mut stream_bundle = StreamBundle {
             ni_task: task,
             counter,
             total_written: 0,
-            buf_size,
+            chunk_size,
             buf_write_timeout,
             target_rep_dur
         };
@@ -294,7 +301,7 @@ pub trait RunControl: CommonHwCfg {
     }
     fn run(
         &mut self,
-        nreps: usize,
+        multiply: usize,
         stream_bundle: &mut StreamBundle,
         samp_bufs: &mut SampBufs,
         start_sync: &StartSync,
@@ -302,6 +309,32 @@ pub trait RunControl: CommonHwCfg {
         alarm_handle: &DropAlarmHandle,
         reps_written: &Arc<Mutex<usize>>
     ) -> Result<(), WorkerError> {
+        match multiply {
+            0 => return Err(WorkerError::new("multiply must be non-zero".to_string())),
+            1 => { /* Not using multiplication */ },
+            _ => { /* Trying to use multiplication - check that sequence is sufficiently long */
+                if self.total_samps() < stream_bundle.chunk_size {
+                    return Err(WorkerError::new(format!(
+                        "Multiplication cannot be used with a sequence shorter that chunksize. \
+                        Consider concatenating several repetitions into a single sequence to reach sufficient duration."
+                    )))
+                }
+            }
+        }
+
+        if multiply == 1 && self.total_samps() < LEGACY_32BIT_LIM {
+            // Using FiniteSamps stop mechanism
+            stream_bundle.ni_task.switch_to_finite_samps_mode()?;
+            stream_bundle.ni_task.set_samp_num_per_chan(self.total_samps())?;
+        } else {
+            // Using "soft stop" mechanism
+            stream_bundle.ni_task.switch_to_cont_samps_mode()?;
+            stream_bundle.ni_task.set_samp_num_per_chan(1)?;
+        }
+
+        // Write the initial chunk into the buffer
+        stream_bundle.total_written += self.write_to_hardware(stream_bundle, samp_bufs, stream_bundle.counter.pos())? as u64;
+
         // (1) Synchronise task start with other threads
         match start_sync {
             StartSync::Primary(recvr_vec) => {
@@ -318,7 +351,7 @@ pub trait RunControl: CommonHwCfg {
         };
 
         // (2) Waveform streaming / in-stream repetition loop
-        for rep_idx in 0..nreps {
+        for rep_idx in 0..multiply {
             // Stream the waveform itself
             while let Some((start_pos, end_pos)) = stream_bundle.counter.tick_next() {
                 self.calc_samps(samp_bufs, start_pos, end_pos)?;
@@ -379,8 +412,8 @@ pub trait RunControl: CommonHwCfg {
            for entering the dummy buffer only after that.
         */
         // - prepare and write the final dummy buffer for "soft stop"
-        self.fill_with_last_written_vals(&stream_bundle.ni_task, samp_bufs, stream_bundle.buf_size)?;
-        self.write_to_hardware(stream_bundle, samp_bufs, stream_bundle.buf_size)?;
+        self.fill_with_last_written_vals(&stream_bundle.ni_task, samp_bufs, stream_bundle.chunk_size)?;
+        self.write_to_hardware(stream_bundle, samp_bufs, stream_bundle.chunk_size)?;
 
         // - calculate the initial chunk for the next launch while generation is finishing
         stream_bundle.counter.reset();
