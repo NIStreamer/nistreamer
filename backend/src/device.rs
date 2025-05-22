@@ -256,21 +256,28 @@ pub trait RunControl: CommonHwCfg {
         Ok(())
     }
     fn init_stream(&mut self, chunksize_ms: f64, target_rep_dur: f64) -> Result<(StreamBundle, SampBufs), WorkerError> {
+        // ToDo: consider the crazy case:
+        //      chunksize > 2^32
+        //      (seq_dur = 8 min, chunkdur = 10 min)
+
         let chunk_dur = chunksize_ms / 1000.0;
         let chunk_size = (chunk_dur * self.samp_rate()).round() as usize;
+        /* Assumption note:
+            We mean `chunk_dur` to be the "smallest calc/write chunk for which streaming is stable".
+            Thus we assume:
+            - `chunk_size` is less than LEGACY_32BIT_LIM = 2^32;
+            - Using soft stop mechanism (thus any in-stream reps) is not safe for a sequence shorter than `chunk_dur`.
+
+            Technically, a user may try to set a very large `chunk_dur` to effectively eliminate streaming.
+            We didn't properly handle this case so some features may behave unexpectedly or fail.
+        */
         let buf_write_timeout = match &self.hw_cfg().min_bufwrite_timeout {
             Some(min_timeout) => Some(f64::max(10.0*chunk_dur, *min_timeout)),
             None => None,
         };
 
         let seq_len = self.total_samps();
-        // Determine buffer size to allocate
-        let must_use_soft_stop = self.total_samps() > LEGACY_32BIT_LIM;
-        let buf_size = if must_use_soft_stop {
-            chunk_size
-        } else {
-            std::cmp::min(seq_len, chunk_size)
-        };
+        let buf_size = std::cmp::min(seq_len, chunk_size);
         let mut samp_buf = self.alloc_samp_bufs(buf_size);
         let counter = StreamCounter::new(seq_len, buf_size);
 
