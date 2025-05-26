@@ -95,10 +95,11 @@ impl ToString for WorkerError {
 }
 
 pub struct StreamBundle {
+    short_seq: bool,
     ni_task: NiTask,
     counter: StreamCounter,
     total_written: u64,
-    buf_size: usize,
+    chunk_size: usize,
     buf_write_timeout: Option<f64>,  // Some(finite_timeout_in_seconds) or None - wait infinitely
     target_rep_dur: f64,
 }
@@ -253,34 +254,50 @@ pub trait RunControl: CommonHwCfg {
         };
         Ok(())
     }
+
     fn init_stream(&mut self, chunksize_ms: f64, target_rep_dur: f64) -> Result<(StreamBundle, SampBufs), WorkerError> {
         let chunk_dur = chunksize_ms / 1000.0;
+        let chunk_size = (chunk_dur * self.samp_rate()).round() as usize;
+        let seq_len = self.total_samps();
+
+        // Stop mechanism will depend on the sequence length
+        /*
+            - for a "short sequence" (seq_len < chunk_size) we use `FiniteSamps` mode which relies
+              on the onboard counter and stops the task when requested sample number has been generated;
+
+            - for a "long sequence" we use "soft stop" mechanism - a full buffer of dummy samples is
+              appended at the end of the waveform and software-time `stop` is called when generation
+              moves into the dummy buffer.
+        */
+        let short_seq = seq_len < chunk_size;
+
+        // DAQmx Setup
+        let task = NiTask::new()?;
+        self.create_task_chans(&task)?;
+        if short_seq {
+            task.cfg_output_buf(seq_len)?;
+            self.cfg_clk_sync(&task, Some(seq_len))?;
+        } else {
+            task.cfg_output_buf((chunk_size as f64 * 1.2) as usize)?;  // NI buffer is slightly larger than buf_size to save time for sample calc between reps with soft-stop approach
+            self.cfg_clk_sync(&task, None)?;
+        };
+        task.disallow_regen()?;
+
+        let buf_size = if short_seq {seq_len} else {chunk_size};
+        let mut samp_buf = self.alloc_samp_bufs(buf_size);
+        let counter = StreamCounter::new(seq_len, buf_size);
         let buf_write_timeout = match &self.hw_cfg().min_bufwrite_timeout {
             Some(min_timeout) => Some(f64::max(10.0*chunk_dur, *min_timeout)),
             None => None,
         };
 
-        let seq_len = self.total_samps();
-        let buf_size = std::cmp::min(
-            seq_len,
-            (chunk_dur * self.samp_rate()).round() as usize,
-        );
-        let mut samp_buf = self.alloc_samp_bufs(buf_size);
-        let counter = StreamCounter::new(seq_len, buf_size);
-
-        // DAQmx Setup
-        let task = NiTask::new()?;
-        self.create_task_chans(&task)?;
-        task.cfg_output_buf((buf_size as f64 * 1.2) as usize)?;  // NI buffer is slightly larger than buf_size to save time for sample calc between reps with soft-stop approach
-        task.disallow_regen()?;
-        self.cfg_clk_sync(&task)?;
-
-        // Bundle NiTask, StreamCounter, and buf_write_timeout together for convenience:
+        // Bundle stream items together for convenience:
         let mut stream_bundle = StreamBundle {
+            short_seq,
             ni_task: task,
             counter,
             total_written: 0,
-            buf_size,
+            chunk_size,
             buf_write_timeout,
             target_rep_dur
         };
@@ -292,6 +309,7 @@ pub trait RunControl: CommonHwCfg {
 
         Ok((stream_bundle, samp_buf))
     }
+
     fn run(
         &mut self,
         nreps: usize,
@@ -302,7 +320,20 @@ pub trait RunControl: CommonHwCfg {
         alarm_handle: &DropAlarmHandle,
         reps_written: &Arc<Mutex<usize>>
     ) -> Result<(), WorkerError> {
-        // (1) Synchronise task start with other threads
+        // (1) Sanity checks
+        if nreps == 0 {
+            return Err(WorkerError::new("nreps = 0 provided".to_string()))
+        }
+        if stream_bundle.short_seq && nreps > 1 {
+            return Err(WorkerError::new(format!(
+                "Sequence duration {} ms is too short for in-stream looping - it must be at least equal to chunksize={} ms or longer. \
+                 You could concatenate several repetitions into a single sequence to increase duration.",
+                1000.0 * (self.total_samps() as f64) / self.samp_rate(),
+                1000.0 * (stream_bundle.chunk_size as f64) / self.samp_rate()
+            )))
+        }
+
+        // (2) Synchronise task start with other threads
         match start_sync {
             StartSync::Primary(recvr_vec) => {
                 for recvr in recvr_vec {
@@ -317,7 +348,7 @@ pub trait RunControl: CommonHwCfg {
             StartSync::None => stream_bundle.ni_task.start()?
         };
 
-        // (2) Waveform streaming / in-stream repetition loop
+        // (3) Waveform streaming / in-stream repetition loop
         for rep_idx in 0..nreps {
             // Stream the waveform itself
             while let Some((start_pos, end_pos)) = stream_bundle.counter.tick_next() {
@@ -326,69 +357,80 @@ pub trait RunControl: CommonHwCfg {
             }
             stream_bundle.counter.reset();
 
-            // Padding samps to align stop time of this device to all others
-            /*
-               Clock grids of different devices may not align due to incommensurate sampling rates
-               plus some devices may get an extra tick at the end when compiling due to closing edge clipping.
-               As a result, different devices will in general have different single-sequence play durations.
-
-               If not corrected, this difference will systematically add up when running many iterations
-               of in-stream loop resulting in relative drift between pulses on different cards.
-
-               To avoid this, we add padding samples (filled with the last written values - effectively keeping const)
-               to all cards which finish earlier than the "longest" one to make all cards aim at the common
-               "target stop time" for all repetitions.
-
-               (cards will still stop at slightly different times since clock grids generally don't align,
-                but this difference will always be within a single clock period from the common target
-                instead of building up with subsequent repetitions)
-            */
-            let target_stop_time = stream_bundle.target_rep_dur * (rep_idx + 1) as f64;
-            let target_stop_pos = (target_stop_time * self.samp_rate()).round() as u64;
-            // - assertion check
-            if target_stop_pos < stream_bundle.total_written {
-                return Err(WorkerError::new(format!(
-                    "[BUG] In-stream looping, padding: target_stop_pos={target_stop_pos} is below stream_bundle.total_written={}",
-                    stream_bundle.total_written
-                )))
-            }
-            // - padding
-            let padding_ticks = target_stop_pos - stream_bundle.total_written;
-            if padding_ticks > 0 {
-                self.fill_with_last_written_vals(&stream_bundle.ni_task, samp_bufs, padding_ticks as usize)?;
-                stream_bundle.total_written += self.write_to_hardware(stream_bundle, samp_bufs, padding_ticks as usize)? as u64;
-            }
-
-            // Update rep count in the table
+            // Update rep written count in the table
             *reps_written.lock() = rep_idx + 1;
-            // Check if stop was requested or any peer workers have dropped
-            if *stop_flag.lock() || alarm_handle.drop_detected() {
-                break
+
+            if rep_idx < nreps - 1 {
+                // Padding samps to align stop time of this device to all others
+                /*
+                   Clock grids of different devices may not align due to incommensurate sampling rates
+                   plus some devices may get an extra tick at the end when compiling due to closing edge clipping.
+                   As a result, different devices will in general have different single-sequence play durations.
+
+                   If not corrected, this difference will systematically add up when running many iterations
+                   of in-stream loop resulting in relative drift between pulses on different cards.
+
+                   To avoid this, we add padding samples (filled with the last written values - effectively keeping const)
+                   to all cards which finish earlier than the "longest" one to make all cards aim at the common
+                   "target stop time" for all repetitions.
+
+                   (cards will still stop at slightly different times since clock grids generally don't align,
+                    but this difference will always be within a single clock period from the common target
+                    instead of building up with subsequent repetitions)
+                */
+                let target_stop_time = stream_bundle.target_rep_dur * (rep_idx + 1) as f64;
+                let target_stop_pos = (target_stop_time * self.samp_rate()).round() as u64;
+                // - assertion check
+                if target_stop_pos < stream_bundle.total_written {
+                    return Err(WorkerError::new(format!(
+                        "[BUG] In-stream looping, padding: target_stop_pos={target_stop_pos} is below stream_bundle.total_written={}",
+                        stream_bundle.total_written
+                    )))
+                }
+                // - padding
+                let padding_ticks = target_stop_pos - stream_bundle.total_written;
+                if padding_ticks > 0 {
+                    self.fill_with_last_written_vals(&stream_bundle.ni_task, samp_bufs, padding_ticks as usize)?;
+                    stream_bundle.total_written += self.write_to_hardware(stream_bundle, samp_bufs, padding_ticks as usize)? as u64;
+                }
+
+                // Check if stop was requested or any peer workers have dropped
+                if *stop_flag.lock() || alarm_handle.drop_detected() {
+                    break
+                }
             }
         }
 
-        // (3) "Soft Stop"
-        /*
-           After finishing writing all the waveform samples we additionally write a full "dummy" chunk
-           filled with the last written values for each channel. When streamer plays out all the waveform samples,
-           generation moves into the dummy samples - the task is still running, but the outputs are effectively kept constant.
-           During this period we can call stop on the task at any moment.
+        // (4) Wait until finished and stop + calc the first buffer for the next launch while waiting
+        // - Dummy buffer if "soft stop" mechanism is used
+        if !stream_bundle.short_seq {
+            /*
+               After finishing writing all the waveform samples we additionally write a full "dummy" chunk
+               filled with the last written values for each channel. When streamer plays out all the waveform samples,
+               generation moves into the dummy samples - the task is still running, but the outputs are effectively kept constant.
+               During this period we can call software-timed stop on the task at any moment.
 
-           Even after writing in the whole dummy buffer, there is still about 20% of the finial waveform chunk
-           left to play out. We use this time to calculate the initial chunk for the next launch and start waiting
-           for entering the dummy buffer only after that.
-        */
-        // - prepare and write the final dummy buffer for "soft stop"
-        self.fill_with_last_written_vals(&stream_bundle.ni_task, samp_bufs, stream_bundle.buf_size)?;
-        self.write_to_hardware(stream_bundle, samp_bufs, stream_bundle.buf_size)?;
+               Even after writing in the whole dummy buffer, there is still about 20% of the finial
+               waveform chunk left to play out because we set NI buffer to be 1.2 of `chunksize`.
+               We use this time to calculate the initial chunk for the next launch and start waiting
+               for entering the dummy buffer only after that.
+            */
+            self.fill_with_last_written_vals(&stream_bundle.ni_task, samp_bufs, stream_bundle.chunk_size)?;
+            self.write_to_hardware(stream_bundle, samp_bufs, stream_bundle.chunk_size)?;
+        }
 
-        // - calculate the initial chunk for the next launch while generation is finishing
+        // - calculate the initial buffer for the next launch while generation is finishing
         stream_bundle.counter.reset();
         let (start_pos, end_pos) = stream_bundle.counter.tick_next().unwrap();
         self.calc_samps(samp_bufs, start_pos, end_pos)?;
 
-        // - wait until sequence generation is finished
-        Self::wait_until_done_and_stop(stream_bundle)?;
+        // - wait until sequence generation is finished and stop the task
+        if stream_bundle.short_seq {
+            stream_bundle.ni_task.wait_until_done(stream_bundle.buf_write_timeout.clone())?;
+            stream_bundle.ni_task.stop()?;
+        } else {
+            Self::wait_until_done_and_soft_stop(stream_bundle)?
+        };
 
         // - write the initial chunk for the next launch
         stream_bundle.total_written = 0;
@@ -417,10 +459,14 @@ pub trait RunControl: CommonHwCfg {
     ///    while secondary devices will configure their tasks to expect the start trigger.
     /// 3. Configures reference clocking based on the device's `ref_clk_line`. Devices that import the reference clock will
     ///    configure it accordingly, while others will export the signal.
-    fn cfg_clk_sync(&self, task: &NiTask) -> Result<(), DAQmxError> {
+    fn cfg_clk_sync(&self, task: &NiTask, finite_samps: Option<usize>) -> Result<(), DAQmxError> {
         // (1) Sample clock timing mode (includes sample clock source). Additionally, config samp_clk_out
         let samp_clk_src = self.hw_cfg().samp_clk_in.clone().unwrap_or("".to_string());
-        task.cfg_samp_clk_timing_continuous_samps(&samp_clk_src, self.samp_rate())?;
+        if let Some(samps_per_chan) = finite_samps {
+            task.cfg_samp_clk_timing_finite_samps(&samp_clk_src, self.samp_rate(), samps_per_chan as u64)?
+        } else {
+            task.cfg_samp_clk_timing_continuous_samps(&samp_clk_src, self.samp_rate())?
+        };
         if let Some(term) = &self.hw_cfg().samp_clk_out {
             task.export_signal(
                 DAQMX_VAL_SAMPLECLOCK,
@@ -471,7 +517,7 @@ pub trait RunControl: CommonHwCfg {
 
     /// Wait until generation of all sequence samples is over and play position moves into the dummy buffer
     /// or timeout elapses. Stops the task before returning in either case.
-    fn wait_until_done_and_stop(stream_bundle: &StreamBundle) -> Result<(), DAQmxError> {
+    fn wait_until_done_and_soft_stop(stream_bundle: &StreamBundle) -> Result<(), DAQmxError> {
         let timeout = stream_bundle.buf_write_timeout.clone();
         let start_instant = Instant::now();
         loop {
