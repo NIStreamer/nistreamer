@@ -205,8 +205,9 @@ class NIStreamer:
 
     def run(self, nreps: Optional[int] = 1):
         with self.init_stream() as stream_handle:
-            stream_handle.launch(nreps=nreps)
-            stream_handle.wait_until_finished()
+            for _ in range(nreps):
+                stream_handle.launch(instream_reps=1)
+                stream_handle.wait_until_finished()
 
     def close_stream(self):
         """You typically do not need to use this function at all
@@ -249,8 +250,8 @@ class StreamHandle:
     def __init__(self, streamer):
         self._streamer = streamer
 
-    def launch(self, nreps=1):
-        self._streamer.launch(nreps=nreps)
+    def launch(self, instream_reps=1):
+        self._streamer.launch(instream_reps=instream_reps)
 
     def wait_until_finished(self, timeout: Optional[float] = None):
         """There are two modes available depending on `timeout` value.

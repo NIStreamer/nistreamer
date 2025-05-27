@@ -449,7 +449,7 @@ impl Streamer {
         }
     }
 
-    pub fn launch(&mut self, nreps: usize) -> Result<(), String> {
+    pub fn launch(&mut self, instream_reps: usize) -> Result<(), String> {
         // (1) Status checks
         if self.stream_controls.is_none() {
             return Err("Stream is not initialized".to_string())
@@ -462,7 +462,7 @@ impl Streamer {
         // (2) Command all workers to launch
         *controls.stop_flag.lock() = false;
         controls.reps_written_table.values().for_each(|counter| *counter.lock() = 0);
-        controls.worker_cmd_chan.send(WorkerCmd::Run(nreps));
+        controls.worker_cmd_chan.send(WorkerCmd::Run(instream_reps));
         controls.status = StreamStatus::Running;
 
         Ok(())

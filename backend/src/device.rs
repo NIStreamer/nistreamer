@@ -326,8 +326,11 @@ pub trait RunControl: CommonHwCfg {
         }
         if stream_bundle.short_seq && nreps > 1 {
             return Err(WorkerError::new(format!(
-                "Sequence duration {} ms is too short for in-stream looping - it must be at least equal to chunksize={} ms or longer. \
-                 You could concatenate several repetitions into a single sequence to increase duration.",
+                "Requested {nreps} > 1 of in-stream repetitions but the sequence duration {} ms is too \
+                short for in-stream looping - it must be at least equal to chunksize={} ms or longer. \
+                Note that you can still use repetitive re-launching. \
+                Alternatively, you could concatenate several repetitions into a single sequence \
+                to reach the necessary duration for in-stream looping.",
                 1000.0 * (self.total_samps() as f64) / self.samp_rate(),
                 1000.0 * (stream_bundle.chunk_size as f64) / self.samp_rate()
             )))
