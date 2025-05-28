@@ -308,7 +308,29 @@ impl Streamer {
     pub fn init_stream(&mut self) -> Result<(), String> {
         // (1) Sanity checks
         if self.stream_controls.is_some() {
-            return Err("There is already a stream initialized".to_string())
+            /*
+                It is possible that there is already a stream initialized when `init_stream` is called.
+
+                User access to `init_stream()` is very restricted by PyAPI - it is only exposed in the
+                `__enter__()` method of ContextManager. If init fails, the Rust logic below automatically
+                cleans up before returning the error. And if init succeeds, context manager `__exit__()`
+                logic closes the stream before leaving `with` context.
+                So if there is a double-init attempt, it is very unlikely to be due to a user mistake -
+                giving an error message here is not very helpful.
+
+                Instead, the already-existing stream is most likely a "leftover". A rapid succession of
+                `KeyboardInterrupt`s may disrupt `__enter__()`/`__exit__()` logic such that `close_stream()`
+                is never called while the Python `StreamHandle` instance is lost.
+
+                This is why we silently close the already-existing stream here, if any.
+                (we do still return an error if the old stream returns an error report)
+            */
+            self.close_stream().map_err(|msg| format!(
+                "init_stream(): there was some stream initialized already - closed it and collected its' error report (see below). \
+                You can now call `init_stream()` again. \n\n\
+                Error report from the closed stream: \n\
+                {msg}"
+            ))?;
         }
 
         if !self.got_instructions() {
@@ -457,7 +479,10 @@ impl Streamer {
         let controls = self.stream_controls.as_mut().unwrap();
         match controls.status {
             StreamStatus::Idle => { /* good to go */ },
-            StreamStatus::Running => return Err("Stream is already running".to_string()),
+            StreamStatus::Running => return Err(
+                "Stream is already running, cannot double-launch. \
+                Tip: you should always call `wait_until_finished()` after each `launch()` even if you are sure generation has finished.".to_string()
+            ),
         }
         // (2) Command all workers to launch
         *controls.stop_flag.lock() = false;
