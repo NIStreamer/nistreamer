@@ -170,21 +170,21 @@ pub struct Streamer {
 }
 
 impl BaseStreamer for Streamer {
-    fn devs(&self) -> Vec<&dyn TagBaseDev> {
+    fn devs(&self) -> Vec<&(dyn TagBaseDev + Send)> {
         self.devs
             .values()
             .map(|ni_dev| match ni_dev {
-                NIDev::AO(dev) => dev as &dyn TagBaseDev,
-                NIDev::DO(dev) => dev as &dyn TagBaseDev,
+                NIDev::AO(dev) => dev as &(dyn TagBaseDev + Send),
+                NIDev::DO(dev) => dev as &(dyn TagBaseDev + Send),
             })
             .collect()
     }
-    fn devs_mut(&mut self) -> Vec<&mut dyn TagBaseDev> {
+    fn devs_mut(&mut self) -> Vec<&mut (dyn TagBaseDev + Send)> {
         self.devs
             .values_mut()
             .map(|ni_dev| match ni_dev {
-                NIDev::AO(dev) => dev as &mut dyn TagBaseDev,
-                NIDev::DO(dev) => dev as &mut dyn TagBaseDev,
+                NIDev::AO(dev) => dev as &mut (dyn TagBaseDev + Send),
+                NIDev::DO(dev) => dev as &mut (dyn TagBaseDev + Send),
             })
             .collect()
     }
