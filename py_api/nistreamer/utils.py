@@ -74,7 +74,7 @@ def iplot(chan_list, start_time=None, end_time=None, nsamps=1000, renderer='brow
 
     streamer_wrap.validate_compile_cache()
 
-    total_run_time = streamer_wrap.total_run_time()
+    total_run_time = streamer_wrap.shortest_dev_run_time()
     if start_time is not None:
         if start_time > total_run_time:
             raise ValueError(f"Requsted start_time={start_time} exceeds total run time {total_run_time}")

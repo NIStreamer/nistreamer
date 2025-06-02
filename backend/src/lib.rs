@@ -127,6 +127,7 @@
 pub mod channel;
 pub mod device;
 pub mod streamer;
+pub mod drop_alarm;
 pub mod utils;
 pub mod worker_cmd_chan;
 pub mod flat_wrap;
@@ -139,6 +140,7 @@ use nidaqmx_dummy as nidaqmx;
 
 extern crate indexmap;
 extern crate itertools;
+extern crate parking_lot;
 
 extern crate pyo3;
 use pyo3::prelude::*;

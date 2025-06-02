@@ -30,10 +30,14 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::iter::zip;
 use std::fmt::{Debug, Formatter};
+use std::sync::Arc;
 use std::sync::mpsc::{Sender, Receiver, SendError, RecvError};
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
 use itertools::Itertools;
+use parking_lot::Mutex;
 
 use base_streamer::channel::BaseChan;
 use base_streamer::device::BaseDev;
@@ -41,6 +45,7 @@ use base_streamer::device::BaseDev;
 use crate::channel::{AOChan, DOChan, DOPort};
 use crate::utils::StreamCounter;
 use crate::worker_cmd_chan::{CmdRecvr, WorkerCmd};
+use crate::drop_alarm::DropAlarmHandle;
 use crate::nidaqmx::*;
 
 pub enum StartSync {
@@ -51,6 +56,11 @@ pub enum StartSync {
 
 pub struct WorkerError {
     msg: String
+}
+impl WorkerError {
+    pub fn new(msg: String) -> Self {
+        Self { msg }
+    }
 }
 impl From<SendError<()>> for WorkerError {
     fn from(_value: SendError<()>) -> Self {
@@ -85,9 +95,13 @@ impl ToString for WorkerError {
 }
 
 pub struct StreamBundle {
+    short_seq: bool,
     ni_task: NiTask,
     counter: StreamCounter,
+    total_written: u64,
+    chunk_size: usize,
     buf_write_timeout: Option<f64>,  // Some(finite_timeout_in_seconds) or None - wait infinitely
+    target_rep_dur: f64,
 }
 
 pub enum SampBufs {
@@ -132,6 +146,13 @@ pub trait CommonHwCfg {
     fn hw_cfg_mut(&mut self) -> &mut HwCfg;
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum WorkerReport {
+    InitComplete,
+    IterComplete,
+    RunFinished,
+}
+
 /// The `StreamableDevice` trait extends the [`nicompiler_backend::BaseDevice`] trait of [`nicompiler_backend::Device`]
 /// to provide additional functionality for streaming tasks.
 pub trait RunControl: CommonHwCfg {
@@ -157,10 +178,11 @@ pub trait RunControl: CommonHwCfg {
     /// `create_do_chan` method for each channel.
     ///
     /// The channel names are constructed using the format `/{device_name}/{channel_name}`.
-    fn create_task_chans(&self, task: &NiTask) -> Result<(), DAQmxError>;
+    fn create_task_chans(&mut self, task: &NiTask) -> Result<(), DAQmxError>;
     fn alloc_samp_bufs(&self, buf_size: usize) -> SampBufs;
     fn calc_samps(&self, samp_bufs: &mut SampBufs, start_pos: usize, end_pos: usize) -> Result<(), String>;
     fn write_to_hardware(&self, bundle: &mut StreamBundle, bufs: &SampBufs, samp_num: usize) -> Result<usize, DAQmxError>;
+    fn fill_with_last_written_vals(&self, task: &NiTask, bufs: &mut SampBufs, samp_num: usize) -> Result<(), String>;
 
     /// Streams an instruction signal to the specified NI-DAQ device.
     ///
@@ -204,19 +226,26 @@ pub trait RunControl: CommonHwCfg {
     /// that the device has been properly compiled before calling this method.
     fn worker_loop(
         &mut self,
-        bufsize_ms: f64,
+        chunksize_ms: f64,
         mut cmd_recvr: CmdRecvr,
-        report_sendr: Sender<()>,
+        report_sender: Sender<()>,
         start_sync: StartSync,
+        stop_flag: Arc<Mutex<bool>>,
+        alarm_handle: DropAlarmHandle,
+        reps_written: Arc<Mutex<usize>>,
+        target_rep_dur: f64,
     ) -> Result<(), WorkerError> {
-        let (mut stream_bundle, mut samp_bufs) = self.cfg_run_(bufsize_ms)?;
-        report_sendr.send(())?;
+        let (mut stream_bundle, mut samp_bufs) = self.init_stream(chunksize_ms, target_rep_dur)?;
+        report_sender.send(())?;
 
         loop {
             match cmd_recvr.recv()? {
-                WorkerCmd::Stream(calc_next) => {
-                    self.stream_run_(&mut stream_bundle, &mut samp_bufs, &start_sync, calc_next)?;
-                    report_sendr.send(())?;
+                WorkerCmd::Run(nreps) => {
+                    self.run(nreps, &mut stream_bundle, &mut samp_bufs, &start_sync, &stop_flag, &alarm_handle, &reps_written)?;
+                    if alarm_handle.drop_detected() {
+                        break
+                    };
+                    report_sender.send(())?;
                 },
                 WorkerCmd::Close => {
                     break
@@ -225,50 +254,89 @@ pub trait RunControl: CommonHwCfg {
         };
         Ok(())
     }
-    fn cfg_run_(&self, bufsize_ms: f64) -> Result<(StreamBundle, SampBufs), WorkerError> {
-        let buf_dur = bufsize_ms / 1000.0;
-        let buf_write_timeout = match &self.hw_cfg().min_bufwrite_timeout {
-            Some(min_timeout) => Some(f64::max(10.0*buf_dur, *min_timeout)),
-            None => None,
-        };
 
+    fn init_stream(&mut self, chunksize_ms: f64, target_rep_dur: f64) -> Result<(StreamBundle, SampBufs), WorkerError> {
+        let chunk_dur = chunksize_ms / 1000.0;
+        let chunk_size = (chunk_dur * self.samp_rate()).round() as usize;
         let seq_len = self.total_samps();
-        let buf_size = std::cmp::min(
-            seq_len,
-            (buf_dur * self.samp_rate()).round() as usize,
-        );
-        let mut samp_buf = self.alloc_samp_bufs(buf_size);
-        let counter = StreamCounter::new(seq_len, buf_size);
+
+        // Stop mechanism will depend on the sequence length
+        /*
+            - for a "short sequence" (seq_len < chunk_size) we use `FiniteSamps` mode which relies
+              on the onboard counter and stops the task when requested sample number has been generated;
+
+            - for a "long sequence" we use "soft stop" mechanism - a full buffer of dummy samples is
+              appended at the end of the waveform and software-time `stop` is called when generation
+              moves into the dummy buffer.
+        */
+        let short_seq = seq_len < chunk_size;
 
         // DAQmx Setup
         let task = NiTask::new()?;
         self.create_task_chans(&task)?;
-        task.cfg_output_buf(buf_size)?;
+        if short_seq {
+            task.cfg_output_buf(seq_len)?;
+            self.cfg_clk_sync(&task, Some(seq_len))?;
+        } else {
+            task.cfg_output_buf((chunk_size as f64 * 1.2) as usize)?;  // NI buffer is slightly larger than buf_size to save time for sample calc between reps with soft-stop approach
+            self.cfg_clk_sync(&task, None)?;
+        };
         task.disallow_regen()?;
-        self.cfg_clk_sync(&task, seq_len)?;
 
-        // Bundle NiTask, StreamCounter, and buf_write_timeout together for convenience:
+        let buf_size = if short_seq {seq_len} else {chunk_size};
+        let mut samp_buf = self.alloc_samp_bufs(buf_size);
+        let counter = StreamCounter::new(seq_len, buf_size);
+        let buf_write_timeout = match &self.hw_cfg().min_bufwrite_timeout {
+            Some(min_timeout) => Some(f64::max(10.0*chunk_dur, *min_timeout)),
+            None => None,
+        };
+
+        // Bundle stream items together for convenience:
         let mut stream_bundle = StreamBundle {
+            short_seq,
             ni_task: task,
             counter,
+            total_written: 0,
+            chunk_size,
             buf_write_timeout,
+            target_rep_dur
         };
 
         // Calc and write the initial sample chunk into the buffer
         let (start_pos, end_pos) = stream_bundle.counter.tick_next().unwrap();
         self.calc_samps(&mut samp_buf, start_pos, end_pos)?;
-        self.write_to_hardware(&mut stream_bundle, &samp_buf, end_pos - start_pos)?;
+        stream_bundle.total_written += self.write_to_hardware(&mut stream_bundle, &samp_buf, end_pos - start_pos)? as u64;
 
         Ok((stream_bundle, samp_buf))
     }
-    fn stream_run_(
-        &self,
+
+    fn run(
+        &mut self,
+        nreps: usize,
         stream_bundle: &mut StreamBundle,
         samp_bufs: &mut SampBufs,
         start_sync: &StartSync,
-        calc_next: bool
+        stop_flag: &Arc<Mutex<bool>>,
+        alarm_handle: &DropAlarmHandle,
+        reps_written: &Arc<Mutex<usize>>
     ) -> Result<(), WorkerError> {
-        // Synchronise task start with other threads
+        // (1) Sanity checks
+        if nreps == 0 {
+            return Err(WorkerError::new("nreps = 0 provided".to_string()))
+        }
+        if stream_bundle.short_seq && nreps > 1 {
+            return Err(WorkerError::new(format!(
+                "Requested {nreps} > 1 of in-stream repetitions but the sequence duration {} ms is too \
+                short for in-stream looping - it must be at least equal to chunksize={} ms or longer. \
+                Note that you can still use repetitive re-launching. \
+                Alternatively, you could concatenate several repetitions into a single sequence \
+                to reach the necessary duration for in-stream looping.",
+                1000.0 * (self.total_samps() as f64) / self.samp_rate(),
+                1000.0 * (stream_bundle.chunk_size as f64) / self.samp_rate()
+            )))
+        }
+
+        // (2) Synchronise task start with other threads
         match start_sync {
             StartSync::Primary(recvr_vec) => {
                 for recvr in recvr_vec {
@@ -283,27 +351,94 @@ pub trait RunControl: CommonHwCfg {
             StartSync::None => stream_bundle.ni_task.start()?
         };
 
-        // Main streaming loop
-        while let Some((start_pos, end_pos)) = stream_bundle.counter.tick_next() {
-            self.calc_samps(samp_bufs, start_pos, end_pos)?;
-            self.write_to_hardware(stream_bundle, samp_bufs, end_pos - start_pos)?;
+        // (3) Waveform streaming / in-stream repetition loop
+        for rep_idx in 0..nreps {
+            // Stream the waveform itself
+            while let Some((start_pos, end_pos)) = stream_bundle.counter.tick_next() {
+                self.calc_samps(samp_bufs, start_pos, end_pos)?;
+                stream_bundle.total_written += self.write_to_hardware(stream_bundle, samp_bufs, end_pos - start_pos)? as u64;
+            }
+            stream_bundle.counter.reset();
+
+            // Update rep written count in the table
+            *reps_written.lock() = rep_idx + 1;
+
+            if rep_idx < nreps - 1 {
+                // Padding samps to align stop time of this device to all others
+                /*
+                   Clock grids of different devices may not align due to incommensurate sampling rates
+                   plus some devices may get an extra tick at the end when compiling due to closing edge clipping.
+                   As a result, different devices will in general have different single-sequence play durations.
+
+                   If not corrected, this difference will systematically add up when running many iterations
+                   of in-stream loop resulting in relative drift between pulses on different cards.
+
+                   To avoid this, we add padding samples (filled with the last written values - effectively keeping const)
+                   to all cards which finish earlier than the "longest" one to make all cards aim at the common
+                   "target stop time" for all repetitions.
+
+                   (cards will still stop at slightly different times since clock grids generally don't align,
+                    but this difference will always be within a single clock period from the common target
+                    instead of building up with subsequent repetitions)
+                */
+                let target_stop_time = stream_bundle.target_rep_dur * (rep_idx + 1) as f64;
+                let target_stop_pos = (target_stop_time * self.samp_rate()).round() as u64;
+                // - assertion check
+                if target_stop_pos < stream_bundle.total_written {
+                    return Err(WorkerError::new(format!(
+                        "[BUG] In-stream looping, padding: target_stop_pos={target_stop_pos} is below stream_bundle.total_written={}",
+                        stream_bundle.total_written
+                    )))
+                }
+                // - padding
+                let padding_ticks = target_stop_pos - stream_bundle.total_written;
+                if padding_ticks > 0 {
+                    self.fill_with_last_written_vals(&stream_bundle.ni_task, samp_bufs, padding_ticks as usize)?;
+                    stream_bundle.total_written += self.write_to_hardware(stream_bundle, samp_bufs, padding_ticks as usize)? as u64;
+                }
+
+                // Check if stop was requested or any peer workers have dropped
+                if *stop_flag.lock() || alarm_handle.drop_detected() {
+                    break
+                }
+            }
         }
 
-        // Now need to wait for the final sample chunk to be generated out by the card before stopping the task.
-        // In the mean time, we can calculate the initial chunk for the next repetition in the case we are on repeat.
-        if !calc_next {
+        // (4) Wait until finished and stop + calc the first buffer for the next launch while waiting
+        // - Dummy buffer if "soft stop" mechanism is used
+        if !stream_bundle.short_seq {
+            /*
+               After finishing writing all the waveform samples we additionally write a full "dummy" chunk
+               filled with the last written values for each channel. When streamer plays out all the waveform samples,
+               generation moves into the dummy samples - the task is still running, but the outputs are effectively kept constant.
+               During this period we can call software-timed stop on the task at any moment.
+
+               Even after writing in the whole dummy buffer, there is still about 20% of the finial
+               waveform chunk left to play out because we set NI buffer to be 1.2 of `chunksize`.
+               We use this time to calculate the initial chunk for the next launch and start waiting
+               for entering the dummy buffer only after that.
+            */
+            self.fill_with_last_written_vals(&stream_bundle.ni_task, samp_bufs, stream_bundle.chunk_size)?;
+            self.write_to_hardware(stream_bundle, samp_bufs, stream_bundle.chunk_size)?;
+        }
+
+        // - calculate the initial buffer for the next launch while generation is finishing
+        stream_bundle.counter.reset();
+        let (start_pos, end_pos) = stream_bundle.counter.tick_next().unwrap();
+        self.calc_samps(samp_bufs, start_pos, end_pos)?;
+
+        // - wait until sequence generation is finished and stop the task
+        if stream_bundle.short_seq {
             stream_bundle.ni_task.wait_until_done(stream_bundle.buf_write_timeout.clone())?;
             stream_bundle.ni_task.stop()?;
         } else {
-            stream_bundle.counter.reset();
-            let (start_pos, end_pos) = stream_bundle.counter.tick_next().unwrap();
-            self.calc_samps(samp_bufs, start_pos, end_pos)?;
+            Self::wait_until_done_and_soft_stop(stream_bundle)?
+        };
 
-            stream_bundle.ni_task.wait_until_done(stream_bundle.buf_write_timeout.clone())?;
-            stream_bundle.ni_task.stop()?;
+        // - write the initial chunk for the next launch
+        stream_bundle.total_written = 0;
+        stream_bundle.total_written += self.write_to_hardware(stream_bundle, samp_bufs, end_pos - start_pos)? as u64;
 
-            self.write_to_hardware(stream_bundle, samp_bufs, end_pos - start_pos)?;
-        }
         Ok(())
     }
 
@@ -327,14 +462,14 @@ pub trait RunControl: CommonHwCfg {
     ///    while secondary devices will configure their tasks to expect the start trigger.
     /// 3. Configures reference clocking based on the device's `ref_clk_line`. Devices that import the reference clock will
     ///    configure it accordingly, while others will export the signal.
-    fn cfg_clk_sync(&self, task: &NiTask, seq_len: usize) -> Result<(), DAQmxError> {
+    fn cfg_clk_sync(&self, task: &NiTask, finite_samps: Option<usize>) -> Result<(), DAQmxError> {
         // (1) Sample clock timing mode (includes sample clock source). Additionally, config samp_clk_out
         let samp_clk_src = self.hw_cfg().samp_clk_in.clone().unwrap_or("".to_string());
-        task.cfg_samp_clk_timing(
-            &samp_clk_src,
-            self.samp_rate(),
-            seq_len as u64
-        )?;
+        if let Some(samps_per_chan) = finite_samps {
+            task.cfg_samp_clk_timing_finite_samps(&samp_clk_src, self.samp_rate(), samps_per_chan as u64)?
+        } else {
+            task.cfg_samp_clk_timing_continuous_samps(&samp_clk_src, self.samp_rate())?
+        };
         if let Some(term) = &self.hw_cfg().samp_clk_out {
             task.export_signal(
                 DAQMX_VAL_SAMPLECLOCK,
@@ -380,6 +515,42 @@ pub trait RunControl: CommonHwCfg {
             task.set_ref_clk_rate(10.0e6)?;
         };
 
+        Ok(())
+    }
+
+    /// Wait until generation of all sequence samples is over and play position moves into the dummy buffer
+    /// or timeout elapses. Stops the task before returning in either case.
+    fn wait_until_done_and_soft_stop(stream_bundle: &StreamBundle) -> Result<(), DAQmxError> {
+        let timeout = stream_bundle.buf_write_timeout.clone();
+        let start_instant = Instant::now();
+        loop {
+            let current_play_pos = stream_bundle.ni_task.get_write_total_samp_per_chan_generated()?;
+            if current_play_pos > stream_bundle.total_written {
+                stream_bundle.ni_task.stop()?;
+                return Ok(())
+            }
+            if timeout.is_some_and(|timeout| start_instant.elapsed().as_secs_f64() > timeout) {
+                stream_bundle.ni_task.stop()?;
+                return Err(DAQmxError::new("Generation did not finish before wait_until_done timeout elapsed. Force-stopped the task".to_string()))
+            }
+            sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Utility function. Recommended for use in `Self::fill_with_last_written_vals` implementation
+    fn fill_with_vals<T: Clone>(target_buf: &mut [T], chan_vals: &Vec<T>, chan_num: usize, samp_num: usize) -> Result<(), String> {
+        // Sanity checks:
+        if chan_num != chan_vals.len() {
+            return Err(format!("[fill_with_vals()] Number of channel values {} does not match channel number {chan_num}", chan_vals.len()))
+        }
+        if chan_num * samp_num > target_buf.len() {
+            return Err(format!("[fill_with_last_vals()] requested sample number {} exceeds target buffer length {}", chan_num * samp_num, target_buf.len()))
+        }
+
+        for (chan_idx, val) in chan_vals.iter().enumerate() {
+            let chan_slice = &mut target_buf[chan_idx * samp_num .. (chan_idx + 1) * samp_num];
+            chan_slice.fill(val.clone());
+        }
         Ok(())
     }
 }
@@ -434,6 +605,10 @@ impl AODev {
             ))
         }
     }
+
+    pub fn active_chan_names(&self) -> Vec<String> {
+        self.active_chans().iter().map(|chan| chan.name()).collect()
+    }
 }
 
 impl BaseDev for AODev {
@@ -483,9 +658,9 @@ impl RunControl for AODev {
         self.compiled_stop_pos()
     }
 
-    fn create_task_chans(&self, task: &NiTask) -> Result<(), DAQmxError> {
-        for chan in self.active_chans() {
-            task.create_ao_chan(&format!("/{}/{}", self.max_name(), chan.name()))?;
+    fn create_task_chans(&mut self, task: &NiTask) -> Result<(), DAQmxError> {
+        for chan_name in self.active_chan_names() {
+            task.create_ao_chan(&format!("/{}/{}", self.max_name(), chan_name))?;
         };
         Ok(())
     }
@@ -529,6 +704,19 @@ impl RunControl for AODev {
             bundle.buf_write_timeout.clone()
         )
     }
+
+    fn fill_with_last_written_vals(&self, task: &NiTask, bufs: &mut SampBufs, samp_num: usize) -> Result<(), String> {
+        let samp_buf = match bufs {
+            SampBufs::AO(buf) => buf,
+            other => return Err(format!("AODev::fill_with_last_written_vals() received incorrect `SampBufs` variant {other:?}")),
+        };
+
+        if let Some(last_vals) = task.get_last_written_vals_f64() {
+            <AODev as RunControl>::fill_with_vals(&mut samp_buf[..], &last_vals, self.active_chans().len(), samp_num)
+        } else {
+            Err(format!("task.get_last_written_vals_f64() returned None"))
+        }
+    }
 }
 // endregion
 
@@ -539,7 +727,7 @@ pub struct DODev {
     chans: IndexMap<String, DOChan>,
     hw_cfg: HwCfg,
     const_fns_only: bool,
-    compiled_ports: Option<IndexMap<usize, DOPort>>
+    compiled_ports: Option<IndexMap<usize, DOPort>>,
 }
 
 impl DODev {
@@ -801,9 +989,9 @@ impl RunControl for DODev {
         self.compiled_stop_pos()
     }
 
-    fn create_task_chans(&self, task: &NiTask) -> Result<(), DAQmxError> {
+    fn create_task_chans(&mut self, task: &NiTask) -> Result<(), DAQmxError> {
         for port_num in self.active_port_nums() {
-            task.create_do_chan(&format!("/{}/port{}", self.max_name(), port_num))?;
+            task.create_do_port(&format!("/{}/port{}", self.max_name(), port_num))?;
         }
         Ok(())
     }
@@ -919,14 +1107,14 @@ impl RunControl for DODev {
         let ports_buf = match bufs {
             SampBufs::DOPorts(buf) => buf,
             SampBufs::DOLinesPorts((_lines_buf, ports_buf)) => ports_buf,
-            other => return Err(DAQmxError::new(format!("DODev::write_to_card() received incorrect `SampBufs` variant {other:?}")))
+            other => return Err(DAQmxError::new(format!("DODev::write_to_hardware() received incorrect `SampBufs` variant {other:?}")))
         };
 
         // Sanity check - requested `samp_num` is not too large
         if self.active_port_nums().len() * samp_num > ports_buf.len() {
             return Err(DAQmxError::new(format!(
                 "[write_to_hardware()] BUG:\n\
-                \tsamp_num * self.running_port_nums().len() = {} \n\
+                \tsamp_num * self.active_port_nums().len() = {} \n\
                 exceeds the total number of samples available in the buffer\n\
                 \tsamp_buf.len() = {}",
                 samp_num * self.active_port_nums().len(),
@@ -935,12 +1123,25 @@ impl RunControl for DODev {
         }
 
         // Write to hardware
-        let samps_written = bundle.ni_task.write_digital_port(
+        bundle.ni_task.write_digital_port(
             &ports_buf[..],
             samp_num,
             bundle.buf_write_timeout.clone()
-        )?;
-        Ok(samps_written)
+        )
+    }
+
+    fn fill_with_last_written_vals(&self, task: &NiTask, bufs: &mut SampBufs, samp_num: usize) -> Result<(), String> {
+        let ports_buf = match bufs {
+            SampBufs::DOPorts(buf) => buf,
+            SampBufs::DOLinesPorts((_lines_buf, ports_buf)) => ports_buf,
+            other => return Err(format!("DODev::fill_with_last_written_vals() received incorrect `SampBufs` variant {other:?}")),
+        };
+
+        if let Some(last_vals) = task.get_last_written_vals_u32() {
+            <DODev as RunControl>::fill_with_vals(&mut ports_buf[..], &last_vals, self.active_port_nums().len(), samp_num)
+        } else {
+            Err(format!("task.get_last_written_vals_u32() returned None"))
+        }
     }
 }
 // endregion
@@ -963,6 +1164,32 @@ impl CommonHwCfg for NIDev {
         match self {
             Self::AO(dev) => dev.hw_cfg_mut(),
             Self::DO(dev) => dev.hw_cfg_mut(),
+        }
+    }
+}
+
+impl NIDev {
+    pub fn compiled_stop_time(&self) -> f64 {
+        match self {
+            NIDev::AO(dev) => dev.compiled_stop_time(),
+            NIDev::DO(dev) => dev.compiled_stop_time(),
+        }
+    }
+
+    pub fn worker_loop(
+        &mut self,
+        chunksize_ms: f64,
+        cmd_recvr: CmdRecvr,
+        report_sender: Sender<()>,
+        start_sync: StartSync,
+        stop_flag: Arc<Mutex<bool>>,
+        alarm_handle: DropAlarmHandle,
+        reps_written: Arc<Mutex<usize>>,
+        target_rep_dur: f64,
+    ) -> Result<(), WorkerError> {
+        match self {
+            NIDev::AO(dev) => dev.worker_loop(chunksize_ms, cmd_recvr, report_sender, start_sync, stop_flag, alarm_handle, reps_written, target_rep_dur),
+            NIDev::DO(dev) => dev.worker_loop(chunksize_ms, cmd_recvr, report_sender, start_sync, stop_flag, alarm_handle, reps_written, target_rep_dur),
         }
     }
 }

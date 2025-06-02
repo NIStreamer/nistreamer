@@ -68,6 +68,7 @@
 use std::cell::{Cell, RefCell};
 use std::fs::File;
 use std::io::{Write, Error};
+use std::time;
 use serde::Serialize;
 use indexmap::IndexMap;
 use std::ffi::NulError;
@@ -76,7 +77,7 @@ type CInt32 = libc::c_int;
 pub const DAQMX_VAL_STARTTRIGGER: CInt32 = 12491;
 pub const DAQMX_VAL_SAMPLECLOCK: CInt32 = 12487;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DAQmxError {
     msg: String
 }
@@ -173,16 +174,19 @@ pub fn disconnect_terms(src: &str, dest: &str) -> Result<(), DAQmxError> {
 #[derive(Serialize)]
 pub struct NiTask {
     samp_rate: Cell<f64>,
-    seq_len: Cell<u64>,
     buf_size: Cell<usize>,
     dev_name: RefCell<String>,
-    ao_chans: RefCell<IndexMap<String, Vec<f64>>>,
-    do_chans: RefCell<IndexMap<String, Vec<u32>>>,
+    ao_chans: RefCell<IndexMap<String, Vec<f64>>>,  // the `Vec<>` is used to store written samples if `DUMP_SAMPS` is `true`
+    do_chans: RefCell<IndexMap<String, Vec<u32>>>,  // the `Vec<>` is used to store written samples if `DUMP_SAMPS` is `true`
     start_trig_in: RefCell<Option<String>>,
     start_trig_out: RefCell<Option<String>>,
     samp_clk_in: RefCell<Option<String>>,
     samp_clk_out: RefCell<Option<String>>,
     ref_clk_in: RefCell<Option<String>>,
+    seq_len: RefCell<Option<u64>>,
+    last_written_vals_f64: RefCell<Option<Vec<f64>>>,
+    last_written_vals_u32: RefCell<Option<Vec<u32>>>,
+    start_walltime_nanos: RefCell<Option<u128>>,
 }
 
 impl NiTask {
@@ -203,7 +207,6 @@ impl NiTask {
     pub fn new() -> Result<Self, DAQmxError> {
         Ok(Self {
             samp_rate: Cell::new(0.0),
-            seq_len: Cell::new(0),
             buf_size: Cell::new(0),
             dev_name: RefCell::new("".to_string()),
             ao_chans: RefCell::new(IndexMap::new()),
@@ -213,12 +216,15 @@ impl NiTask {
             samp_clk_in: RefCell::new(None),
             samp_clk_out: RefCell::new(None),
             ref_clk_in: RefCell::new(None),
+            seq_len: RefCell::new(None),
+            last_written_vals_f64: RefCell::new(None),
+            last_written_vals_u32: RefCell::new(None),
+            start_walltime_nanos: RefCell::new(None),
         })
     }
 
     pub fn clear(&self) -> Result<(), DAQmxError> {
         self.samp_rate.set(0.0);
-        self.seq_len.set(0);
         self.buf_size.set(0);
         self.dev_name.borrow_mut().clear();
         self.ao_chans.borrow_mut().clear();
@@ -228,12 +234,23 @@ impl NiTask {
         *self.samp_clk_in.borrow_mut() = None;
         *self.samp_clk_out.borrow_mut() = None;
         *self.ref_clk_in.borrow_mut() = None;
+        *self.seq_len.borrow_mut() = None;
+        *self.last_written_vals_f64.borrow_mut() = None;
+        *self.last_written_vals_u32.borrow_mut() = None;
+        *self.start_walltime_nanos.borrow_mut() = None;
         Ok(())
     }
     pub fn start(&self) -> Result<(), DAQmxError> {
+        *self.start_walltime_nanos.borrow_mut() = Some(
+            time::SystemTime::now()
+            .duration_since(time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+        );
         Ok(())
     }
     pub fn stop(&self) -> Result<(), DAQmxError> {
+        *self.start_walltime_nanos.borrow_mut() = None;
         if Self::DUMP_INFO {
             self.dump_to_file()?;
         }
@@ -247,13 +264,23 @@ impl NiTask {
         Ok(())
     }
 
-    pub fn cfg_samp_clk_timing(&self, clk_src: &str, samp_rate: f64, seq_len: u64) -> Result<(), DAQmxError> {
+    pub fn cfg_samp_clk_timing_continuous_samps(&self, clk_src: &str, samp_rate: f64) -> Result<(), DAQmxError> {
         self.samp_rate.set(samp_rate);
-        self.seq_len.set(seq_len);
         *self.samp_clk_in.borrow_mut() = Some(clk_src.to_string());
         if Self::DUMP_SAMPS {
-            self.ao_chans.borrow_mut().values_mut().for_each(|vec| *vec = Vec::with_capacity(seq_len as usize));
-            self.do_chans.borrow_mut().values_mut().for_each(|vec| *vec = Vec::with_capacity(seq_len as usize));
+            self.ao_chans.borrow_mut().values_mut().for_each(|vec| *vec = Vec::new());
+            self.do_chans.borrow_mut().values_mut().for_each(|vec| *vec = Vec::new());
+        }
+        Ok(())
+    }
+
+    pub fn cfg_samp_clk_timing_finite_samps(&self, clk_src: &str, samp_rate: f64, samps_per_chan: u64) -> Result<(), DAQmxError> {
+        self.samp_rate.set(samp_rate);
+        *self.seq_len.borrow_mut() = Some(samps_per_chan);
+        *self.samp_clk_in.borrow_mut() = Some(clk_src.to_string());
+        if Self::DUMP_SAMPS {
+            self.ao_chans.borrow_mut().values_mut().for_each(|vec| *vec = Vec::with_capacity(samps_per_chan as usize));
+            self.do_chans.borrow_mut().values_mut().for_each(|vec| *vec = Vec::with_capacity(samps_per_chan as usize));
         }
         Ok(())
     }
@@ -271,7 +298,7 @@ impl NiTask {
         Ok(())
     }
 
-    pub fn create_do_chan(&self, name: &str) -> Result<(), DAQmxError> {
+    pub fn create_do_port(&self, name: &str) -> Result<(), DAQmxError> {
         if let Some(dev_name) = Self::extract_dev_name(name) {
             *self.dev_name.borrow_mut() = dev_name.to_string();
         }
@@ -285,16 +312,25 @@ impl NiTask {
                 chan_samps.extend_from_slice(&samp_buf[chan_idx * samp_num .. (chan_idx + 1) * samp_num]);
             }
         }
-        // let approx_wait_time = 0.8 * 100e-9 * samp_num as f64;  // 100 ns - sample clock period assuming 10 MSa/s sampling rate for DO card
-        // std::thread::sleep(std::time::Duration::from_secs_f64(approx_wait_time));
+
+        // Imitate waiting for buffer space to become available as samples are generated out
+        if self.last_written_vals_u32.borrow().is_some() {
+            let approx_wait_time = samp_num as f64 / self.samp_rate.get();
+            std::thread::sleep(std::time::Duration::from_secs_f64(approx_wait_time));
+        }
+
+        // Safe last written values
+        let last_written_vals = Self::pick_last_vals(samp_buf, self.do_chans.borrow().len(), samp_num)?;
+        *self.last_written_vals_u32.borrow_mut() = Some(last_written_vals);
+
         Ok(samp_num)
     }
 
-    pub fn write_digital_lines(&self, _samp_buf: &[u8], samp_num: usize, _timeout: Option<f64>) -> Result<usize, DAQmxError> {
+    /*pub fn write_digital_lines(&self, _samp_buf: &[u8], samp_num: usize, _timeout: Option<f64>) -> Result<usize, DAQmxError> {
         let approx_wait_time = 0.8 * 100e-9 * samp_num as f64;  // 100 ns - sample clock period assuming 10 MSa/s sampling rate for DO card
         std::thread::sleep(std::time::Duration::from_secs_f64(approx_wait_time));
         Ok(samp_num)
-    }
+    }*/
 
     pub fn write_analog(&self, samp_buf: &[f64], samp_num: usize, _timeout: Option<f64>) -> Result<usize, DAQmxError> {
         if Self::DUMP_SAMPS {
@@ -302,9 +338,26 @@ impl NiTask {
                 chan_samps.extend_from_slice(&samp_buf[chan_idx * samp_num .. (chan_idx + 1) * samp_num]);
             }
         }
-        // let approx_wait_time = 0.8 * 1e-6 * samp_num as f64;  // 1 us - sample clock period assuming 1 MSa/s sampling rate for AO card
-        // std::thread::sleep(std::time::Duration::from_secs_f64(approx_wait_time));
+
+        // Imitate waiting for buffer space to become available as samples are generated out
+        if self.last_written_vals_f64.borrow().is_some() {
+            let approx_wait_time = samp_num as f64 / self.samp_rate.get();
+            std::thread::sleep(std::time::Duration::from_secs_f64(approx_wait_time));
+        }
+
+        // Safe last written values
+        let last_written_vals = Self::pick_last_vals(samp_buf, self.ao_chans.borrow().len(), samp_num)?;
+        *self.last_written_vals_f64.borrow_mut() = Some(last_written_vals);
+
         Ok(samp_num)
+    }
+
+    pub fn get_last_written_vals_f64(&self) -> Option<Vec<f64>> {
+        self.last_written_vals_f64.borrow().clone()
+    }
+
+    pub fn get_last_written_vals_u32(&self) -> Option<Vec<u32>> {
+        self.last_written_vals_u32.borrow().clone()
     }
 
     pub fn set_ref_clk_rate(&self, _rate: f64) -> Result<(), DAQmxError> {
@@ -341,7 +394,17 @@ impl NiTask {
     }
 
     pub fn get_write_total_samp_per_chan_generated(&self) -> Result<u64, DAQmxError> {
-        Ok(0)
+        if let Some(start_walltime_nanos) = self.start_walltime_nanos.borrow().clone() {
+            let current_walltime_nanos = time::SystemTime::now()
+                .duration_since(time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let elapsed_run_time_secs = (current_walltime_nanos - start_walltime_nanos) as f64 * 1e-9;
+            let elapsed_clk_periods = (self.samp_rate.get() * elapsed_run_time_secs).round() as u64;
+            Ok(elapsed_clk_periods)
+        } else {
+            Err(DAQmxError::new("get_write_total_samp_per_chan_generated(): task was not started".to_string()))
+        }
     }
 
     /// Extracts "dev_name" assuming channel name format "/dev_name/ao0" or "/dev_name/port0"
@@ -358,5 +421,24 @@ impl NiTask {
         file.write_all(serialized.as_bytes())?;
 
         Ok(())
+    }
+
+    /// Utility function. Recommended for use in save `last_written_vals` implementation
+    fn pick_last_vals<T: Clone>(samp_buf: &[T], chan_num: usize, samp_num: usize) -> Result<Vec<T>, DAQmxError> {
+        // Sanity check:
+        if chan_num * samp_num > samp_buf.len() {
+            return Err(DAQmxError::new(format!(
+                "[pick_last_vals()] expected sample number {} exceeds buffer length {}", chan_num * samp_num, samp_buf.len()
+            )))
+        }
+
+        let mut last_vals = Vec::with_capacity(chan_num);
+        for chan_idx in 0..chan_num {
+            let last_samp_idx = (chan_idx + 1) * samp_num - 1;
+            let last_val = samp_buf.get(last_samp_idx).unwrap().clone();
+            last_vals.push(last_val);
+        }
+
+        Ok(last_vals)
     }
 }

@@ -3,7 +3,7 @@ use parking_lot::{Condvar, Mutex};
 
 #[derive(Clone, Copy)]
 pub enum WorkerCmd {
-    Stream(bool),
+    Run(usize),  // nreps - number of in-stream repetitions
     Close,
 }
 

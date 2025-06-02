@@ -45,23 +45,99 @@
 //! module. Also, make sure to explore other related modules like [`device`], [`utils`] for comprehensive
 //! device streaming behavior and NI-DAQmx specific operations, respectively.
 
-use std::collections::HashMap;
 use std::thread;
 use std::thread::JoinHandle;
 use std::sync::Arc;
-use std::sync::mpsc::{Sender, Receiver, channel};
+use std::sync::mpsc::{Receiver, channel, RecvTimeoutError};
+use std::time::Duration;
+use std::collections::HashMap;
 
-use indexmap::IndexMap;
 use parking_lot::Mutex;
+use itertools::Itertools;
+use indexmap::IndexMap;
 
 use base_streamer::device::BaseDev;
 use base_streamer::streamer::{TagBaseDev, BaseStreamer};
 
-use crate::device::{AODev, DODev, NIDev, RunControl, StartSync, WorkerError};
+use crate::device::{AODev, DODev, NIDev, StartSync, WorkerError};
+use crate::worker_cmd_chan::{CmdChan, WorkerCmd};
+use crate::drop_alarm::new_drop_alarm;
 use crate::nidaqmx;
-use crate::nidaqmx::DAQmxError;
-use crate::worker_cmd_chan::{CmdChan, CmdRecvr, WorkerCmd};
-use itertools::Itertools;
+
+#[derive(Debug)]
+pub enum StreamStatus {
+    Idle,
+    Running,
+}
+
+pub struct StreamControls {
+    worker_handles: IndexMap<String, JoinHandle<Result<(), WorkerError>>>,
+    worker_cmd_chan: CmdChan,
+    worker_report_recvrs: Vec<Receiver<()>>,
+    stop_flag: Arc<Mutex<bool>>,
+    reps_written_table: IndexMap<String, Arc<Mutex<usize>>>,
+    // Internal variable to remember stream state:
+    status: StreamStatus,
+}
+
+impl StreamControls {
+    pub fn new() -> Self {
+        Self {
+            worker_handles: IndexMap::new(),
+            worker_cmd_chan: CmdChan::new(),
+            worker_report_recvrs: Vec::new(),
+            stop_flag: Arc::new(Mutex::new(false)),
+            reps_written_table: IndexMap::new(),
+            status: StreamStatus::Idle,
+        }
+    }
+
+    pub fn close_stream(mut self) -> Result<(), String> {
+        // Command all workers to break out of in-stream loops and return.
+        *self.stop_flag.lock() = true;
+        self.worker_cmd_chan.send(WorkerCmd::Close);
+        /*
+            After that, any still-running worker will eventually return no matter what state it was in.
+            Plus any failed ones have quit already by either returning an Err or panicking.
+            So joining all handles should not lead to a deadlock.
+        */
+
+        // Join all worker threads. Collect all error messages, if any.
+        let mut err_msgs = IndexMap::new();
+        for (name, handle) in self.worker_handles.drain(..) {
+            match handle.join() {
+                Ok(res) => match res {
+                    Ok(()) => { /* Worker returned without errors */ }
+                    Err(msg) => {
+                        /* Worker gracefully returned an error */
+                        err_msgs.insert(name, msg.to_string());
+                    }
+                },
+                Err(panic_obj) => {
+                    /* Worker has panicked */
+                    let msg = match panic_obj.downcast_ref::<&'static str>() {
+                        Some(msg) => *msg,
+                        None => match panic_obj.downcast_ref::<String>() {
+                            Some(msg) => &msg[..],
+                            None => "Unknown panic payload type",
+                        },
+                    };
+                    err_msgs.insert(name, format!("Panic message: {msg}"));
+                }
+            }
+        }
+        // Return:
+        if err_msgs.is_empty() {
+            Ok(())
+        } else {
+            let mut joint_err_msg = String::new();
+            for (name, msg) in err_msgs {
+                joint_err_msg.push_str(&format!("[{name}] {msg}\n\n"))
+            }
+            Err(joint_err_msg)
+        }
+    }
+}
 
 /// An extended version of the [`nicompiler_backend::Experiment`] struct, tailored to provide direct
 /// interfacing capabilities with NI devices.
@@ -86,12 +162,11 @@ pub struct Streamer {
     devs: IndexMap<String, NIDev>,
     running_devs: IndexMap<String, Arc<Mutex<NIDev>>>,  // FixMe: this is a temporary dirty hack. Transfer device objects back to the main map (they were transferred out to be able to wrap them into Arc<Mutex<>> for multithreading)
     // Streamer-wide settings
+    chunksize_ms: f64,
     ref_clk_provider: Option<(String, String)>,  // Some((dev_name, terminal_name)) or None
     starts_last: Option<String>,  // Some(dev_name) or None
-    // Worker thread communication objects
-    worker_cmd_chan: CmdChan,
-    worker_report_recvrs: IndexMap<String, Receiver<()>>,
-    worker_handles: IndexMap<String, JoinHandle<Result<(), WorkerError>>>,  // FixMe [after Device move to streamer crate]: Maybe store individual device thread handle and report receiver in the Device struct
+    // Stream controls
+    stream_controls: Option<StreamControls>,
 }
 
 impl BaseStreamer for Streamer {
@@ -137,12 +212,11 @@ impl Streamer {
             devs: IndexMap::new(),
             running_devs: IndexMap::new(),  // FixMe: this is a temporary dirty hack. Transfer device objects back to the main map (they were transferred out to be able to wrap them into Arc<Mutex<>> for multithreading)
             // Streamer-wide settings
+            chunksize_ms: 150.0,
             ref_clk_provider: None,  // Some((dev_name, terminal_name))
             starts_last: None,  // Some(dev_name)
-            // Worker thread communication objects
-            worker_cmd_chan: CmdChan::new(),
-            worker_report_recvrs: IndexMap::new(),
-            worker_handles: IndexMap::new(),  // FixMe [after Device move to streamer crate]: Maybe store individual device thread handle and report receiver in the Device struct
+            // Stream controls
+            stream_controls: None,
         }
     }
 
@@ -184,6 +258,17 @@ impl Streamer {
         }
     }
 
+    pub fn get_chunksize_ms(&self) -> f64 {
+        self.chunksize_ms.clone()
+    }
+    pub fn set_chunksize_ms(&mut self, val: f64) -> Result<(), String> {
+        if val < 0.0 {
+            return Err(format!("Negative chunksize_ms value provided: {val}"))
+        }
+        self.chunksize_ms = val;
+        Ok(())
+    }
+
     pub fn get_starts_last(&self) -> Option<String> {
         self.starts_last.clone()
     }
@@ -198,122 +283,110 @@ impl Streamer {
         self.ref_clk_provider = provider;
     }
 
-    fn export_ref_clk_(&mut self) -> Result<(), DAQmxError> {
+    fn export_ref_clk_(&mut self) -> Result<(), String> {
         if let Some((dev_name, term_name)) = &self.ref_clk_provider {
-            // ToDo: Try tristating the terminal on all other cards in the streamer to ensure the line is not driven
+            // ToDo: Maybe try tristating the terminal on all other cards in the streamer to ensure the line is not driven
             nidaqmx::connect_terms(
                 &format!("/{dev_name}/10MHzRefClock"),
                 &format!("/{dev_name}/{term_name}")
-            )?;
-        };
-        Ok(())
+            ).map_err(|e| e.to_string())
+        } else {
+            Ok(())
+        }
     }
-    pub fn undo_export_ref_clk_(&mut self) -> Result<(), DAQmxError> {
+    pub fn undo_export_ref_clk_(&mut self) -> Result<(), String> {
         if let Some((dev_name, term_name)) = &self.ref_clk_provider {
             nidaqmx::disconnect_terms(
                 &format!("/{dev_name}/10MHzRefClock"),
                 &format!("/{dev_name}/{term_name}")
-            )?;
-        };
-        Ok(())
+            ).map_err(|e| e.to_string())
+        } else {
+            Ok(())
+        }
     }
 
-    fn collect_worker_reports(&mut self) -> Result<(), String> {
-        // Wait for each worker thread to report completion or stop working (by returning or panicking)
-        let mut failed_worker_names = Vec::new();
-        for (dev_name, recvr) in self.worker_report_recvrs.iter() {
-            match recvr.recv() {
-                Ok(()) => {},
-                Err(_err) => { failed_worker_names.push(dev_name.to_string())},
-            };
-        };
-        if failed_worker_names.is_empty() {
-            return Ok(())
+    pub fn init_stream(&mut self) -> Result<(), String> {
+        // (1) Sanity checks
+        if self.stream_controls.is_some() {
+            /*
+                It is possible that there is already a stream initialized when `init_stream` is called.
+
+                User access to `init_stream()` is very restricted by PyAPI - it is only exposed in the
+                `__enter__()` method of ContextManager. If init fails, the Rust logic below automatically
+                cleans up before returning the error. And if init succeeds, context manager `__exit__()`
+                logic closes the stream before leaving `with` context.
+                So if there is a double-init attempt, it is very unlikely to be due to a user mistake -
+                giving an error message here is not very helpful.
+
+                Instead, the already-existing stream is most likely a "leftover". A rapid succession of
+                `KeyboardInterrupt`s may disrupt `__enter__()`/`__exit__()` logic such that `close_stream()`
+                is never called while the Python `StreamHandle` instance is lost.
+
+                This is why we silently close the already-existing stream here, if any.
+                (we do still return an error if the old stream returns an error report)
+            */
+            self.close_stream().map_err(|msg| format!(
+                "init_stream(): there was some stream initialized already - closed it and collected its' error report (see below). \
+                You can now call `init_stream()` again. \n\n\
+                Error report from the closed stream: \n\
+                {msg}"
+            ))?;
         }
 
-        // If any of the workers did not report Ok, they must have stopped
-        // either by gracefully returning a WorkerError or by panicking.
-        // Collect info from all failed workers and return the full error message.
-
-        // For each failed worker:
-        // * dispose of worker_report_receiver
-        // * join the thread to collect error info [join() will automatically consume and dispose of the thread handle]
-        // * transfer Device object from `self.running_devs` back to the main `self.devs`  // FixMe: this is a temporary dirty hack. Transfer device objects back to the main map (they were transferred out to be able to wrap them into Arc<Mutex<>> for multithreading)
-        let mut err_msg_map = IndexMap::new();
-        for dev_name in failed_worker_names.iter() {
-            self.worker_report_recvrs.shift_remove(dev_name).unwrap();
-
-            let join_handle = self.worker_handles.shift_remove(dev_name).unwrap();
-            match join_handle.join() {
-                Ok(worker_result) => {
-                    // The worker had an error but returned gracefully. The WorkerError should be contained in the return result
-                    match worker_result {
-                        Err(worker_error) => err_msg_map.insert(dev_name.to_string(), worker_error.to_string()),
-                        Ok(()) => err_msg_map.insert(dev_name.to_string(), format!("Unexpected scenario - worker has dropped its report_sender yet returned Ok")),
-                    }
-                },
-                Err(_panic_info) => {
-                    // The worker has panicked. Panic info should be contained in the returned object
-                    err_msg_map.insert(dev_name.to_string(), format!("Worker has panicked"))
-                },
-            };
-
-            let dev_container = self.running_devs.shift_remove(dev_name).unwrap();
-            let dev = Arc::into_inner(dev_container).unwrap().into_inner();  // this line extracts Dev instance from Arc<Mutex<>> container
-            self.devs.insert(dev_name.to_string(), dev);
-        }
-
-        // Assemble and return the full error message string
-        let mut full_err_msg = String::new();
-        for (dev_name, err_msg) in err_msg_map {
-            full_err_msg.push_str(&format!(
-                "[{dev_name}] {err_msg}\n"
-            ))
-        }
-        // println!("[collect_thread_reports()] list of failed threads: {:?}", failed_worker_names);
-        // println!("[collect_thread_reports()] full error message:\n{}", full_err_msg);
-        Err(full_err_msg)
-    }
-
-    pub fn cfg_run_(&mut self, bufsize_ms: f64) -> Result<(), String> {
         if !self.got_instructions() {
             return Err("Streamer did not get any instructions".to_string())
         }
         self.validate_compile_cache()?;
 
-        let active_dev_names: Vec<String> = self.devs
-            .iter()
-            .filter(|(_name, typed_dev)| match typed_dev {
-                NIDev::AO(dev) => dev.got_instructions(),
-                NIDev::DO(dev) => dev.got_instructions(),
-            })
-            .map(|(name, _typed_dev)| name.to_string())
-            .collect();
-        /* ToDo: Maybe add a consistency check here: no clash between any exports (ref clk, start_trig, samp_clk) */
+        let active_dev_names = self.active_dev_names();
+        if self.get_starts_last().is_some_and(|starts_last| !active_dev_names.contains(&starts_last)) {
+            return Err(format!(
+                "NIStreamer.starts_last is set to Some({}) but this name is not found in the active device list {active_dev_names:?}. \
+                Either the name is invalid or this device didn't get any instructions and will not run at all",
+                self.get_starts_last().unwrap()
+            ))
+        }
 
-        // Prepare thread sync mechanisms
+        // (2) Starting this point we begin making changes which will need to be reverted when closing the stream or if init fails
 
-        // - command broadcasting channel
-        self.worker_cmd_chan = CmdChan::new();  // the old instance can be reused, but refreshing here to zero `msg_num` for simplicity
+        // Export 10 MHz reference clock
+        /*
+            We are using static ref_clk export (as opposed to task-based export) to be able to always use
+            the same card as the reference clock source even if this card does not run this time.
+        */
+        self.export_ref_clk_()?;
 
-        // - inter-worker start sync channels
+        // Transfer device objects to a separate IndexMap to wrap them into `Arc<Mutex<>>` for sharing with worker threads  // FixMe: this is a dirty hack.
+        for name in active_dev_names {
+            let dev = self.devs.shift_remove(&name).unwrap();
+            self.running_devs.insert(name, Arc::new(Mutex::new(dev)));
+        }
+        let mut running_dev_clones = IndexMap::new();
+        for (name, dev_container) in self.running_devs.iter() {
+            running_dev_clones.insert(name.to_string(), dev_container.clone());
+        };
+
+        // Target duration of a single repetition - the longest compiled sequence duration among all running devs
+        let target_rep_dur = self.running_devs.values()
+            .map(|dev_mutex| dev_mutex.lock().compiled_stop_time())
+            .reduce(|longest_so_far, this| f64::max(longest_so_far, this))
+            .unwrap();
+        let chunksize_ms = self.get_chunksize_ms();
+
+        // New stream controls instance
+        let mut stream_controls = StreamControls::new();
+
+        // Drop alarm
+        let mut alarm_handles = new_drop_alarm(self.running_devs.len());
+
+        // Inter-worker start sync channels
         let mut start_sync = HashMap::new();
-        if let Some(primary_dev_name) = self.get_starts_last() {
-            // Sanity check
-            if !active_dev_names.contains(&primary_dev_name) {
-                return Err(format!(
-                    "NIStreamer.starts_last is set to Some({primary_dev_name}) but this name is not found in the running device list: \n\
-                    {:?}\n\
-                    Either name {primary_dev_name} is invalid or this device didn't get any instructions and will not run at all",
-                    active_dev_names
-                ))
-            };
-
+        if let Some(primary_dev_name) = &self.starts_last {
             // Create and pack sender-receiver pairs
             let mut recvr_vec = Vec::new();
             // - first create all the secondaries
-            for dev_name in active_dev_names.iter().filter(|dev_name| dev_name.to_string() != primary_dev_name.clone()) {
-                let (sender, recvr) = channel();
+            for dev_name in self.running_devs.keys().filter(|dev_name| dev_name.to_string() != primary_dev_name.clone()) {
+                let (sender, recvr) = channel::<()>();
                 recvr_vec.push(recvr);
                 start_sync.insert(
                     dev_name.to_string(),
@@ -322,11 +395,11 @@ impl Streamer {
             }
             // - now create the primary
             start_sync.insert(
-                primary_dev_name,
+                primary_dev_name.to_string(),
                 StartSync::Primary(recvr_vec)
             );
         } else {
-            for dev_name in active_dev_names.iter() {
+            for dev_name in self.running_devs.keys() {
                 start_sync.insert(
                     dev_name.to_string(),
                     StartSync::None,
@@ -334,184 +407,211 @@ impl Streamer {
             }
         }
 
-        // FixMe: this is a temporary dirty hack.
-        //  Transfer device objects to a separate IndexMap to be able to wrap them into Arc<Mutex<>> for multithreading
-        for dev_name in active_dev_names {
-            let dev = self.devs.shift_remove(&dev_name).unwrap();
-            self.running_devs.insert(dev_name, Arc::new(Mutex::new(dev)));
-        }
+        // For each worker, prepare a few more individual controls and launch the thread
+        let mut spawn_result: Result<(), String> = Ok(());
+        for (dev_name, dev_container) in running_dev_clones.drain(..) {
+            // - command receiver for this worker
+            let cmd_recvr = stream_controls.worker_cmd_chan.new_recvr();
 
-        // Do static ref clk export
-        /* We are using static ref_clk export (as opposed to task-based export) to be able to always use
-        the same card as the clock reference source even if this card does not run this time. */
-        if let Err(daqmx_err) = self.export_ref_clk_() {
-            return Err(daqmx_err.to_string())
-        };
+            // - report channel for this worker
+            let (report_sender, report_recvr) = channel::<()>();
+            stream_controls.worker_report_recvrs.push(report_recvr);
 
-        // Prepare a few more inter-thread sync objects and launch worker threads
-        for (dev_name, dev_container) in self.running_devs.iter() {
-            // - worker command receiver
-            let cmd_recvr = self.worker_cmd_chan.new_recvr();
+            // - retrieve start_sync
+            let worker_start_sync = start_sync.remove(&dev_name).unwrap();
 
-            // - worker report channel
-            let (report_sendr, report_recvr) = channel();
-            self.worker_report_recvrs.insert(dev_name.to_string(), report_recvr);
+            let stop_flag = stream_controls.stop_flag.clone();
+            let alarm_handle = alarm_handles.pop().unwrap();
+
+            // - reps written counter
+            let reps_written = Arc::new(Mutex::new(0));
+            stream_controls.reps_written_table.insert(dev_name.clone(), reps_written.clone());
 
             // Launch worker thread
-            let handle = Streamer::launch_worker_thread(
-                dev_name.to_string(),
-                dev_container.clone(),
-                bufsize_ms,
-                cmd_recvr,
-                report_sendr,
-                start_sync.remove(dev_name).unwrap(),
-            )?;
-            self.worker_handles.insert(dev_name.to_string(), handle);
-        }
-        // Wait for all workers to report config completion (handle error collection if necessary)
-        self.collect_worker_reports()
-    }
-    fn launch_worker_thread(
-        dev_name: String,
-        dev_mutex: Arc<Mutex<NIDev>>,
-        bufsize_ms: f64,
-        cmd_recvr: CmdRecvr,
-        report_sendr: Sender<()>,
-        start_sync: StartSync
-    ) -> Result<JoinHandle<Result<(), WorkerError>>, String> {
-        let spawn_result = thread::Builder::new()
-            .name(dev_name)
-            .spawn(move || {
-                let mut typed_dev = dev_mutex.lock();
-                match &mut *typed_dev {
-                    NIDev::AO(dev) => dev.worker_loop(bufsize_ms, cmd_recvr, report_sendr, start_sync),
-                    NIDev::DO(dev) => dev.worker_loop(bufsize_ms, cmd_recvr, report_sendr, start_sync),
-                }
-            });
-        match spawn_result {
-            Ok(handle) => Ok(handle),
-            Err(err) => Err(err.to_string())
-        }
-    }
-    pub fn stream_run_(&mut self, calc_next: bool) -> Result<(), String> {
-        self.worker_cmd_chan.send(WorkerCmd::Stream(calc_next));
-        self.collect_worker_reports()
-    }
-    pub fn close_run_(&mut self) -> Result<(), String> {
-        // Command all workers to break out of the event loop and return
-        self.worker_cmd_chan.send(WorkerCmd::Close);
-
-        // Join all worker threads
-        //  At this point it is expected that all workers should just join cleanly and each return Ok(()):
-        //      if there were any errors during `cfg_run_()` or `stream_run_()` calls,
-        //      those threads should have been handled and removed from `self.worker_handles` during `collect_worker_reports()` calls
-        //
-        //  So if now any of the remaining workers doesn't join or joins but returns a WorkerError
-        //  - this is something very unexpected. Try to join all other threads first and launch a panic at the end.
-        let mut worker_join_err_msgs = IndexMap::new();
-        for (dev_name, handle) in self.worker_handles.drain(..) {
-            match handle.join() {
-                Ok(worker_result) => {
-                    match worker_result {
-                        Ok(()) => {/* this is the only option that we expect */},
-                        Err(worker_error) => {
-                            // The worker has returned gracefully but the return is a WorkerError
-                            worker_join_err_msgs.insert(dev_name, worker_error.to_string());
-                        },
-                    }
+            let res = thread::Builder::new()
+                .name(dev_name.clone())
+                .spawn(move || {
+                    dev_container
+                        .lock()
+                        .worker_loop(chunksize_ms, cmd_recvr, report_sender, worker_start_sync, stop_flag, alarm_handle, reps_written, target_rep_dur)
+                });
+            match res {
+                Ok(join_handle) => { stream_controls.worker_handles.insert(dev_name, join_handle); },
+                Err(io_err) => {
+                    spawn_result = Err(io_err.to_string());
+                    break
                 },
-                Err(_panic_info) => {
-                    // The worker has panicked
-                    worker_join_err_msgs.insert(dev_name, format!("The worker appears to have panicked"));
-                },
-            };
+            }
+        }
+        if let Err(spawn_msg) = spawn_result {
+            let worker_report = stream_controls.close_stream();
+            self.undo_init_changes();
+            return Err(format!("Thread spawn failed: {spawn_msg}. In addition, joint report from all spawned workers (all were shut down): {worker_report:?}"))
         }
 
-        // Dispose of all worker report receivers
-        self.worker_report_recvrs.clear();
+        // (3) Wait for all workers to report init completion and then return.
+        // If anyone fails (error/panic), it will be visible as `Err` on trying to receive the report.
+        let all_completed = stream_controls.worker_report_recvrs
+            .iter()
+            .all(|recvr| recvr.recv().is_ok());
 
-        // Undo static reference clock export
-        let ref_clk_exp_undo_result = self.undo_export_ref_clk_();
+        if all_completed {
+            self.stream_controls = Some(stream_controls);
+            Ok(())
+        } else {
+            // Shut down the stream
+            let worker_report = stream_controls.close_stream();
+            self.undo_init_changes();
+            // Return an error
+            if let Err(msg) = worker_report {
+                Err(msg)
+            } else {
+                Err("[BUG] Some workers have quit unexpectedly at init, yet no worker reported an error".to_string())
+            }
+        }
+    }
 
-        // FixMe: this is a dirty hack.
-        //  Transfer device objects to a separate IndexMap to be able to wrap them into Arc<Mutex<>> for multithreading
-        // Return all used device objects back to the main IndexMap
+    pub fn launch(&mut self, instream_reps: usize) -> Result<(), String> {
+        // (1) Status checks
+        if self.stream_controls.is_none() {
+            return Err("Stream is not initialized".to_string())
+        }
+        let controls = self.stream_controls.as_mut().unwrap();
+        match controls.status {
+            StreamStatus::Idle => { /* good to go */ },
+            StreamStatus::Running => return Err(
+                "Stream is already running, cannot double-launch. \
+                Tip: you should always call `wait_until_finished()` after each `launch()` even if you are sure generation has finished.".to_string()
+            ),
+        }
+        // (2) Command all workers to launch
+        *controls.stop_flag.lock() = false;
+        controls.reps_written_table.values().for_each(|counter| *counter.lock() = 0);
+        controls.worker_cmd_chan.send(WorkerCmd::Run(instream_reps));
+        controls.status = StreamStatus::Running;
+
+        Ok(())
+    }
+
+    pub fn request_stop(&self) -> Result<(), String> {
+        if let Some(controls) = &self.stream_controls {
+            *controls.stop_flag.lock() = true;
+            Ok(())
+        } else {
+            Err("Stream is not initialized".to_string())
+        }
+    }
+
+    pub fn wait_until_finished(&mut self, timeout: Duration) -> Result<bool, String> {
+        if self.stream_controls.is_none() {
+            return Err("Stream is not initialized".to_string())
+        };
+        let controls = self.stream_controls.as_mut().unwrap();
+        match controls.status {
+            StreamStatus::Running => { /* Should wait. Moving further in logic */ },
+            StreamStatus::Idle => return Ok(true),  // Stream is idle, return immediately.
+        }
+
+        /* A two-step approach:
+        (1) Try to receive the report from the first worker using `recv_timeout()`;
+        (2) Then act depending on this first return:
+            * Timeout - the first worker is still busy and no peer drop was detected so far - return timeout;
+            * Disconnected - proceed to closing stream;
+            * Reported completion - other workers should be finishing soon as well.
+                                    Wait for them to report without timeout limit.
+        */
+        let first_recvr = controls.worker_report_recvrs.first().unwrap();
+        let all_reported_ok = match first_recvr.recv_timeout(timeout) {
+            Err(RecvTimeoutError::Timeout) => return Ok(false),
+            Err(RecvTimeoutError::Disconnected) => false,
+            Ok(()) => {
+                controls.worker_report_recvrs[1..]
+                    .iter()
+                    .all(|recvr| recvr.recv().is_ok())
+            },
+        };
+
+        if all_reported_ok {
+            controls.status = StreamStatus::Idle;
+            Ok(true)
+        } else {
+            // Shut down the stream
+            let controls = self.stream_controls.take().unwrap();  // Also sets `self.stream_controls` to `None`
+            let worker_report = controls.close_stream();
+            self.undo_init_changes();
+            // Return an error
+            if let Err(msg) = worker_report {
+                Err(msg)
+            } else {
+                Err("[BUG] Some workers have quit unexpectedly, yet no worker reported an error".to_string())
+            }
+        }
+    }
+
+    /// Returns the number of waveform repetitions (per device) that all devices have fully sampled
+    /// and written into the onboard buffer already (some devices may have written more than that).
+    ///
+    /// **WARNING:** this number does not precisely reflect how many repetitions have been **generated out** already.
+    /// Samples are calculated and written to devices some time ahead of when they will actually be output
+    /// (this is necessary for stream stability). This function tracks how many has been _calculated and written_
+    /// rather than how many has been _actually output_.
+    ///
+    /// So this value should only be used as a coarse progress indicator for monitoring purposes only,
+    /// it is not suitable as a sync mechanism.
+    pub fn reps_written_count(&self) -> Result<usize, String> {
+        if let Some(controls) = &self.stream_controls {
+            let lowest_count = controls.reps_written_table.values()
+                .map(|counter| counter.lock().clone())
+                .reduce(|lowest_so_far, this| usize::min(lowest_so_far, this))
+                .unwrap();
+            Ok(lowest_count)
+        } else {
+            Err("Stream is not initialized".to_string())
+        }
+    }
+
+    pub fn close_stream(&mut self) -> Result<(), String> {
+        if self.stream_controls.is_none() {
+            Ok(())
+        } else {
+            let controls = self.stream_controls.take().unwrap();  // Also sets `self.stream_controls` to `None`
+            let worker_report = controls.close_stream();
+            self.undo_init_changes();
+            worker_report
+        }
+    }
+
+    fn undo_init_changes(&mut self) {
+        // Undo 10 MHz reference export
+        /*
+            This method is meant to be called after `Self::export_ref_clk_()` was called and succeeded.
+            If exporting clock had no errors, `dev_name` and `term_name` should be correct
+            and we do not expect this call to fail.
+        */
+        self.undo_export_ref_clk_().unwrap();
+
+        // Return all active device objects back to the main IndexMap
+        /*
+            This method is meant to be called after all worker threads were joined so all workers
+            must have already returned and dropped their clones of `Arc<Mutex<dev>>`.
+        */
         for (dev_name, dev_box) in self.running_devs.drain(..) {
             let dev = Arc::into_inner(dev_box).unwrap().into_inner();
             self.devs.insert(dev_name, dev);
-        }
-
-        // Finally, return
-        if worker_join_err_msgs.is_empty() && ref_clk_exp_undo_result.is_ok() {
-            // println!("[clear_run()] joined all threads. Completed clearing run. Returning");
-            return Ok(());
-        }
-        //  If any unexpected error has occurred:
-        //  * some workers unexpectedly failed
-        //  * static ref_clk export undoing has failed,
-        //  assemble and return the full error message string
-        let mut full_err_msg = String::new();
-        full_err_msg.push_str("Error during closing run:\n");
-        if let Err(daqmx_err) = ref_clk_exp_undo_result {
-            full_err_msg.push_str(&format!("Failed to undo static reference clock export: {}\n", daqmx_err.to_string()));
-        }
-        for (dev_name, err_msg) in worker_join_err_msgs {
-            full_err_msg.push_str(&format!(
-                "[{dev_name}] {err_msg}\n"
-            ))
-        }
-        Err(full_err_msg)
-    }
-
-    pub fn run(&mut self, nreps: usize, bufsize_ms: f64) -> Result<(), String> {
-        // Group `cfg_run_()` and `stream_run_()` into one closure for convenient interruption in an error case
-        let mut run_ = || -> Result<(), String> {
-            self.cfg_run_(bufsize_ms)?;
-            for i in 0..nreps {
-                self.stream_run_(i < (nreps - 1))?;
-            };
-            Ok(())
         };
-        // The actual run:
-        let run_result = run_();
-        let close_result = self.close_run_();
-
-        // Return result
-        if run_result.is_ok() && close_result.is_ok() {
-            Ok(())
-        } else {
-            let mut full_err_msg = String::new();
-            if let Err(run_err_msg) = run_result {
-                full_err_msg.push_str(&run_err_msg);
-                full_err_msg.push_str("\n");
-            };
-            if let Err(close_err_msg) = close_result {
-                full_err_msg.push_str(&close_err_msg);
-                full_err_msg.push_str("\n");
-            }
-            Err(full_err_msg)
-        }
     }
 
     pub fn reset_all(&self) -> Result<(), String> {
-        // Pack the loop into a closure for convenience:
-        //   to catch DAQmxError at any iteration and later convert it to String before returning
-        let closure = || -> Result<(), DAQmxError> {
-            for dev_name in self.devs.keys() {
-                nidaqmx::reset_device(dev_name)?
-            };
-            Ok(())
+        for dev_name in self.devs.keys() {
+            nidaqmx::reset_device(dev_name).map_err(|e| e.to_string())?
         };
-        match closure() {
-            Ok(()) => Ok(()),
-            Err(daqmx_err) => Err(daqmx_err.to_string())
-        }
+        Ok(())
     }
 }
 
 impl Drop for Streamer {
     fn drop(&mut self) {
-        let res = self.close_run_();
+        let res = self.close_stream();
         if let Err(msg) = res {
             println!("Error when dropping NIStreamer: {msg}")
         };

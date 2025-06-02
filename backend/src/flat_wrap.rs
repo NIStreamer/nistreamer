@@ -46,6 +46,15 @@ impl StreamerWrap {
     }
 
     // region Hardware settings
+    pub fn get_chunksize_ms(&self) -> f64 {
+        self.inner.get_chunksize_ms()
+    }
+    pub fn set_chunksize_ms(&mut self, val: f64) -> PyResult<()> {
+        self.inner
+            .set_chunksize_ms(val)
+            .map_err(|msg| PyValueError::new_err(msg))
+    }
+
     pub fn get_starts_last(&self) -> Option<String> {
         self.inner.get_starts_last()
     }
@@ -79,8 +88,8 @@ impl StreamerWrap {
         self.inner.last_instr_end_time()
     }
 
-    fn total_run_time(&self) -> f64 {
-        self.inner.total_run_time()
+    fn shortest_dev_run_time(&self) -> f64 {
+        self.inner.shortest_dev_run_time()
     }
 
     #[pyo3(signature = (stop_time=None))]
@@ -111,26 +120,42 @@ impl StreamerWrap {
     }
     // endregion
 
-    // region Run control
-    pub fn cfg_run(&mut self, bufsize_ms: f64) -> PyResult<()> {
-        match self.inner.cfg_run_(bufsize_ms) {
-            Ok(()) => Ok(()),
-            Err(msg) => Err(PyValueError::new_err(msg)),
-        }
+    // region Stream control
+    pub fn init_stream(&mut self) -> PyResult<()> {
+        self.inner
+            .init_stream()
+            .map_err(|msg| PyValueError::new_err(msg))
     }
 
-    pub fn stream_run(&mut self, calc_next: bool) -> PyResult<()> {
-        match self.inner.stream_run_(calc_next) {
-            Ok(()) => Ok(()),
-            Err(msg) => Err(PyRuntimeError::new_err(msg)),
-        }
+    pub fn launch(&mut self, instream_reps: usize) -> PyResult<()> {
+        self.inner
+            .launch(instream_reps)
+            .map_err(|msg| PyRuntimeError::new_err(msg))
     }
 
-    pub fn close_run(&mut self) -> PyResult<()> {
-        match self.inner.close_run_() {
-            Ok(()) => Ok(()),
-            Err(msg) => Err(PyRuntimeError::new_err(msg)),
-        }
+    pub fn request_stop(&self) -> PyResult<()> {
+        self.inner
+            .request_stop()
+            .map_err(|msg| PyRuntimeError::new_err(msg))
+    }
+
+    pub fn wait_until_finished(&mut self, timeout: f64) -> PyResult<bool> {
+        let timeout = std::time::Duration::from_secs_f64(timeout);
+        self.inner
+            .wait_until_finished(timeout)
+            .map_err(|msg| PyRuntimeError::new_err(msg))
+    }
+
+    pub fn reps_written_count(&self) -> PyResult<usize> {
+        self.inner
+            .reps_written_count()
+            .map_err(|msg| PyRuntimeError::new_err(msg))
+    }
+
+    pub fn close_stream(&mut self) -> PyResult<()> {
+        self.inner
+            .close_stream()
+            .map_err(|msg| PyRuntimeError::new_err(msg))
     }
     // endregion
 }

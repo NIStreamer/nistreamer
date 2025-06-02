@@ -81,6 +81,7 @@ pub type TaskHandle = *mut libc::c_void;
 
 pub const DAQMX_VAL_RISING: CInt32 = 10280;
 pub const DAQMX_VAL_VOLTS: CInt32 = 10348;
+pub const DAQMX_VAL_CONTSAMPS: CInt32 = 10123;
 pub const DAQMX_VAL_FINITESAMPS: CInt32 = 10178;
 pub const DAQMX_VAL_DONOTALLOWREGEN: CInt32 = 10158;
 pub const DAQMX_VAL_GROUPBYCHANNEL: CBool32 = 0;
@@ -130,6 +131,7 @@ extern "C" {
         name: CConstStr,
         lineGrouping: CInt32,
     ) -> CInt32;
+    fn DAQmxGetTaskNumChans(handle: TaskHandle, data: *mut CUint32) -> CInt32;
 
     fn DAQmxWriteDigitalU32(
         handle: TaskHandle,
@@ -141,7 +143,7 @@ extern "C" {
         sampsPerChanWritten: *mut CInt32,
         reserved: *mut CBool32,
     ) -> CInt32;
-    fn DAQmxWriteDigitalLines(
+    /* fn DAQmxWriteDigitalLines(
         handle: TaskHandle,
         seqLen: CInt32,
         autoStart: CBool32,
@@ -150,7 +152,7 @@ extern "C" {
         writeArray: *const u8,
         sampsPerChanWritten: *mut CInt32,
         reserved: *mut CBool32,
-    ) -> CInt32;
+    ) -> CInt32; */
     fn DAQmxWriteAnalogF64(
         handle: TaskHandle,
         seqLen: CInt32,
@@ -176,7 +178,7 @@ extern "C" {
     fn DAQmxGetWriteTotalSampPerChanGenerated(handle: TaskHandle, data: *mut CUint64) -> CInt32;
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DAQmxError {
     msg: String
 }
@@ -330,6 +332,8 @@ pub fn disconnect_terms(src: &str, dest: &str) -> Result<(), DAQmxError> {
 /// Ensure you have the necessary NI-DAQmx drivers and libraries installed and accessible when using this struct and its associated methods.
 pub struct NiTask {
     handle: TaskHandle,
+    last_written_vals_f64: Option<Vec<f64>>,
+    last_written_vals_u32: Option<Vec<u32>>,
 }
 
 impl NiTask {
@@ -337,7 +341,11 @@ impl NiTask {
         let mut taskhandle: TaskHandle = std::ptr::null_mut();
         let task_name_cstr = std::ffi::CString::new("")?;
         daqmx_call(|| unsafe { DAQmxCreateTask(task_name_cstr.as_ptr(), &mut taskhandle) })?;
-        Ok(Self { handle: taskhandle })
+        Ok(Self {
+            handle: taskhandle,
+            last_written_vals_f64: None,
+            last_written_vals_u32: None,
+        })
     }
 
     pub fn clear(&self) -> Result<(), DAQmxError> {
@@ -360,7 +368,21 @@ impl NiTask {
         daqmx_call(|| unsafe { DAQmxSetWriteRegenMode(self.handle, DAQMX_VAL_DONOTALLOWREGEN) })
     }
 
-    pub fn cfg_samp_clk_timing(&self, clk_src: &str, samp_rate: f64, seq_len: u64) -> Result<(), DAQmxError> {
+    pub fn cfg_samp_clk_timing_continuous_samps(&self, clk_src: &str, samp_rate: f64) -> Result<(), DAQmxError> {
+        let src_cstring = std::ffi::CString::new(clk_src)?;
+        daqmx_call(|| unsafe {
+            DAQmxCfgSampClkTiming(
+                self.handle,
+                src_cstring.as_ptr(),
+                samp_rate as CFloat64,
+                DAQMX_VAL_RISING,
+                DAQMX_VAL_CONTSAMPS,
+                1 as CUint64,
+            )
+        })
+    }
+
+    pub fn cfg_samp_clk_timing_finite_samps(&self, clk_src: &str, samp_rate: f64, samps_per_chan: u64) -> Result<(), DAQmxError> {
         let src_cstring = std::ffi::CString::new(clk_src)?;
         daqmx_call(|| unsafe {
             DAQmxCfgSampClkTiming(
@@ -369,7 +391,7 @@ impl NiTask {
                 samp_rate as CFloat64,
                 DAQMX_VAL_RISING,
                 DAQMX_VAL_FINITESAMPS,
-                seq_len as CUint64,
+                samps_per_chan as CUint64,
             )
         })
     }
@@ -394,7 +416,7 @@ impl NiTask {
         })
     }
 
-    pub fn create_do_chan(&self, name: &str) -> Result<(), DAQmxError> {
+    pub fn create_do_port(&self, name: &str) -> Result<(), DAQmxError> {
         let name_cstr = std::ffi::CString::new(name)?;
         let assigned_name_cstr = std::ffi::CString::new("")?;
         daqmx_call(|| unsafe {
@@ -407,7 +429,13 @@ impl NiTask {
         })
     }
 
-    pub fn write_digital_port(&self, samp_buf: &[u32], samp_num: usize, timeout: Option<f64>) -> Result<usize, DAQmxError> {
+    pub fn get_chan_num(&self) -> Result<usize, DAQmxError> {
+        let mut data: CUint32 = 0;
+        daqmx_call(|| unsafe { DAQmxGetTaskNumChans(self.handle, &mut data as *mut CUint32) })?;
+        Ok(data as usize)
+    }
+
+    pub fn write_digital_port(&mut self, samp_buf: &[u32], samp_num: usize, timeout: Option<f64>) -> Result<usize, DAQmxError> {
         let timeout = match timeout {
             Some(timeout) => timeout as CFloat64,
             None => DAQMX_VAL_WAITINFINITELY,
@@ -426,16 +454,22 @@ impl NiTask {
             )
         })?;
         let nwritten = nwritten as usize;
-        if nwritten == samp_num {
-            Ok(nwritten)
-        } else {
-            Err(DAQmxError::new(format!(
+
+        if nwritten != samp_num {
+            return Err(DAQmxError::new(format!(
                 "write_digital_port(): actually written sample number {nwritten} does not match the originally requested number {samp_num}"
             )))
-        }
+        };
+
+        // Pick-out and save the last values for each channel
+        // by looking at the sample buffer that was just used by the actual write call
+        let last_written_vals = Self::pick_last_vals(samp_buf, self.get_chan_num()?, samp_num)?;
+        self.last_written_vals_u32 = Some(last_written_vals);
+
+        Ok(nwritten)
     }
 
-    pub fn write_digital_lines(&self, samp_buf: &[u8], samp_num: usize, timeout: Option<f64>) -> Result<usize, DAQmxError> {
+    /* pub fn write_digital_lines(&self, samp_buf: &[u8], samp_num: usize, timeout: Option<f64>) -> Result<usize, DAQmxError> {
         let timeout = match timeout {
             Some(timeout) => timeout as CFloat64,
             None => DAQMX_VAL_WAITINFINITELY,
@@ -454,9 +488,9 @@ impl NiTask {
             )
         })?;
         Ok(nwritten as usize)
-    }
+    } */
 
-    pub fn write_analog(&self, samp_buf: &[f64], samp_num: usize, timeout: Option<f64>) -> Result<usize, DAQmxError> {
+    pub fn write_analog(&mut self, samp_buf: &[f64], samp_num: usize, timeout: Option<f64>) -> Result<usize, DAQmxError> {
         let timeout = match timeout {
             Some(timeout) => timeout as CFloat64,
             None => DAQMX_VAL_WAITINFINITELY,
@@ -475,13 +509,27 @@ impl NiTask {
             )
         })?;
         let nwritten = nwritten as usize;
-        if nwritten == samp_num {
-            Ok(nwritten)
-        } else {
-            Err(DAQmxError::new(format!(
+
+        if nwritten != samp_num {
+            return Err(DAQmxError::new(format!(
                 "write_analog(): actually written sample number {nwritten} does not match the originally requested number {samp_num}"
             )))
-        }
+        };
+
+        // Pick-out and save the last values for each channel
+        // by looking at the sample buffer that was just used by the actual write call
+        let last_written_vals = Self::pick_last_vals(samp_buf, self.get_chan_num()?, samp_num)?;
+        self.last_written_vals_f64 = Some(last_written_vals);
+
+        Ok(nwritten)
+    }
+
+    pub fn get_last_written_vals_f64(&self) -> Option<Vec<f64>> {
+        self.last_written_vals_f64.clone()
+    }
+
+    pub fn get_last_written_vals_u32(&self) -> Option<Vec<u32>> {
+        self.last_written_vals_u32.clone()
     }
 
     pub fn set_ref_clk_rate(&self, rate: f64) -> Result<(), DAQmxError> {
@@ -525,6 +573,25 @@ impl NiTask {
             DAQmxGetWriteTotalSampPerChanGenerated(self.handle, &mut data as *mut CUint64)
         })?;
         Ok(data as u64)
+    }
+
+    /// Utility function. Recommended for use in `save_last_written_vals` implementations
+    fn pick_last_vals<T: Clone>(samp_buf: &[T], chan_num: usize, samp_num: usize) -> Result<Vec<T>, DAQmxError> {
+        // Sanity check:
+        if chan_num * samp_num > samp_buf.len() {
+            return Err(DAQmxError::new(format!(
+                "[pick_last_vals()] expected sample number {} exceeds buffer length {}", chan_num * samp_num, samp_buf.len()
+            )))
+        }
+
+        let mut last_vals = Vec::with_capacity(chan_num);
+        for chan_idx in 0..chan_num {
+            let last_samp_idx = (chan_idx + 1) * samp_num - 1;
+            let last_val = samp_buf.get(last_samp_idx).unwrap().clone();
+            last_vals.push(last_val);
+        }
+
+        Ok(last_vals)
     }
 }
 
