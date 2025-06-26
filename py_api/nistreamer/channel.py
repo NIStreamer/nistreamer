@@ -184,12 +184,12 @@ class AOChanProxy(BaseChanProxy):
         )
 
     def linramp(self, t, dur, start_val, end_val, keep_val=True):
-        # Calculate linear function parameters y = a*x + b
-        a = (end_val - start_val) / dur
-        b = ((t + dur) * start_val - t * end_val) / dur
+        # Calculate linear function parameters y = slope*x + offs
+        slope = (end_val - start_val) / dur
+        offs = ((t + dur) * start_val - t * end_val) / dur
 
         return self.add_instr(
-            func=self._std_fn_lib.LinFn(a=a, b=b),
+            func=self._std_fn_lib.LinFn(slope=slope, offs=offs),
             t=t,
             dur=dur,
             keep_val=keep_val
