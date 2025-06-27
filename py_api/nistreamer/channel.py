@@ -1,5 +1,6 @@
 from nistreamer_backend import StreamerWrap, StdFnLib
 from abc import ABC, abstractmethod
+import math
 
 
 class BaseChanProxy(ABC):
@@ -156,6 +157,12 @@ class AOChanProxy(BaseChanProxy):
 
     # region Convenience methods to access the most common StdFnLib functions
     def const(self, t, dur, val):
+        """Constant-value pulse with a fixed duration.
+
+        This method does not have the "keep value" option - the channel will transition
+        to the default value at the end of this pulse.
+        Use `go_const` instruction if you want to set and keep the constant value instead.
+        """
         return self.add_instr(
             func=self._std_fn_lib.ConstF64(val=val),
             t=t,
@@ -164,12 +171,27 @@ class AOChanProxy(BaseChanProxy):
         )
     
     def go_const(self, t, val):
+        """Sets a constant value `val` at time `t` and keeps it until the next instruction start / sequence end."""
         self.add_gothis_instr(
             func=self._std_fn_lib.ConstF64(val=val),
             t=t
         )
 
     def sine(self, t, dur, amp, freq, phase=0, dc_offs=0, keep_val=False):
+        """Sinusoidal pulse with a fixed duration.
+
+        t - start time
+        dur - pulse duration
+        keep_val - if `True`, the last value will be kept after the pulse, otherwise transitions to the default value.
+
+        The waveform is parametrized as follows:
+            `Sine(x) = amp * sin(2Pi * freq * x + phase) + offs`,
+        where
+            amp - amplitude (Volts)
+            freq - linear frequency (Hz, 1/period)
+            phase - (radians)
+            offs - constant offset (Volts)
+        """
         return self.add_instr(
             func=self._std_fn_lib.Sine(amp=amp, freq=freq, phase=phase, offs=dc_offs),
             t=t,
@@ -178,18 +200,53 @@ class AOChanProxy(BaseChanProxy):
         )
     
     def go_sine(self, t, amp, freq, phase=0, dc_offs=0):
+        """Sinusoidal pulse without a specified duration.
+
+        During compilation, the waveform will cover the whole interval
+        from `t` until the next instruction start / sequence end.
+
+        The waveform is parametrized as follows:
+            `Sine(x) = amp * sin(2Pi * freq * x + phase) + offs`,
+        where
+            amp - amplitude (Volts)
+            freq - linear frequency (Hz, 1/period)
+            phase - (radians)
+            offs - constant offset (Volts)
+        """
         self.add_gothis_instr(
             func=self._std_fn_lib.Sine(amp=amp, freq=freq, phase=phase, offs=dc_offs),
             t=t
         )
 
     def linramp(self, t, dur, start_val, end_val, keep_val=True):
+        """Linear ramp.
+
+        Connects the points `(t, start_val)` and `(t + dur, end_val)` with a linear function.
+        """
         # Calculate linear function parameters y = slope*x + offs
         slope = (end_val - start_val) / dur
         offs = ((t + dur) * start_val - t * end_val) / dur
 
         return self.add_instr(
             func=self._std_fn_lib.LinFn(slope=slope, offs=offs),
+            t=t,
+            dur=dur,
+            keep_val=keep_val
+        )
+
+    def sineramp(self, t, dur, start_val, end_val, keep_val=True):
+        """Sinusoidal ramp.
+
+        Connects the points `(t, start_val)` and `(t + dur, end_val)` with a half-period of a sine function
+        such that the derivative is zero on both ends."""
+        amp = (end_val - start_val) / 2
+        offs = (end_val + start_val) / 2
+        period = 2 * dur
+        freq = 1 / period
+        phase = -2*math.pi * (t/period + 1/4)
+
+        return self.add_instr(
+            func=self._std_fn_lib.Sine(amp=amp, freq=freq, phase=phase, offs=offs),
             t=t,
             dur=dur,
             keep_val=keep_val
@@ -285,6 +342,7 @@ class DOChanProxy(BaseChanProxy):
 
     # region Convenience methods to access the most common StdFnLib functions
     def go_high(self, t):
+        """Sets the logical high at time `t` and keeps it until the next instruction start / sequence end."""
         self._unchecked_add_instr(
             func=self._std_fn_lib.ConstBool(val=True),
             t=t,
@@ -292,6 +350,7 @@ class DOChanProxy(BaseChanProxy):
         )
 
     def go_low(self, t):
+        """Sets the logical low at time `t` and keeps it until the next instruction start / sequence end."""
         self._unchecked_add_instr(
             func=self._std_fn_lib.ConstBool(val=False),
             t=t,
@@ -299,6 +358,12 @@ class DOChanProxy(BaseChanProxy):
         )
 
     def high(self, t, dur):
+        """Logical-high pulse from time `t` to `t + dur`.
+
+        This method does not have the "keep value" option - the channel will transition
+        to the default value at the end of this pulse.
+        Use `go_high` instruction if you want to set and keep the constant value instead.
+        """
         self._unchecked_add_instr(
             func=self._std_fn_lib.ConstBool(val=True),
             t=t,
@@ -307,6 +372,12 @@ class DOChanProxy(BaseChanProxy):
         return dur
 
     def low(self, t, dur):
+        """Logical-low pulse from time `t` to `t + dur`.
+
+        This method does not have the "keep value" option - the channel will transition
+        to the default value at the end of this pulse.
+        Use `go_low` instruction if you want to set and keep the constant value instead.
+        """
         self._unchecked_add_instr(
             func=self._std_fn_lib.ConstBool(val=False),
             t=t,
