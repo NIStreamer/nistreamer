@@ -177,7 +177,7 @@ class AOChanProxy(BaseChanProxy):
             t=t
         )
 
-    def sine(self, t, dur, amp, freq, phase=0, dc_offs=0, keep_val=False):
+    def sine(self, t, dur, amp, freq, phase=0, offs=0, keep_val=False):
         """Sinusoidal pulse with a fixed duration.
 
         t - start time
@@ -193,13 +193,13 @@ class AOChanProxy(BaseChanProxy):
             offs - constant offset (Volts)
         """
         return self.add_instr(
-            func=self._std_fn_lib.Sine(amp=amp, freq=freq, phase=phase, offs=dc_offs),
+            func=self._std_fn_lib.Sine(amp=amp, freq=freq, phase=phase, offs=offs),
             t=t,
             dur=dur,
             keep_val=keep_val
         )
     
-    def go_sine(self, t, amp, freq, phase=0, dc_offs=0):
+    def go_sine(self, t, amp, freq, phase=0, offs=0):
         """Sinusoidal pulse without a specified duration.
 
         During compilation, the waveform will cover the whole interval
@@ -214,7 +214,7 @@ class AOChanProxy(BaseChanProxy):
             offs - constant offset (Volts)
         """
         self.add_gothis_instr(
-            func=self._std_fn_lib.Sine(amp=amp, freq=freq, phase=phase, offs=dc_offs),
+            func=self._std_fn_lib.Sine(amp=amp, freq=freq, phase=phase, offs=offs),
             t=t
         )
 
