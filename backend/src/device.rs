@@ -146,13 +146,6 @@ pub trait CommonHwCfg {
     fn hw_cfg_mut(&mut self) -> &mut HwCfg;
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum WorkerReport {
-    InitComplete,
-    IterComplete,
-    RunFinished,
-}
-
 /// The `StreamableDevice` trait extends the [`nicompiler_backend::BaseDevice`] trait of [`nicompiler_backend::Device`]
 /// to provide additional functionality for streaming tasks.
 pub trait RunControl: CommonHwCfg {
