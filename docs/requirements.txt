@@ -1,0 +1,5 @@
+sphinx
+myst-parser
+myst-nb
+sphinx-autodoc-typehints
+sphinx_rtd_theme
