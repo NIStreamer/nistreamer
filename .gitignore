@@ -21,3 +21,6 @@ __pycache__/
 
 # PyCharm files
 .idea/
+
+# Sphinx build artifacts
+docs/_build/
