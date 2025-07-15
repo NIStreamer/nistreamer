@@ -1,10 +1,10 @@
 """Streamer module.
 
-Contains the main ``NIStreamer`` class, as well as ``StreamHandle``
-and ``ContextManager`` classes.
+Contains the main ``NIStreamer`` class, as well as ``StreamHandle`` class
+for stream control in ``with`` context.
 """
 
-from nistreamer_backend import StreamerWrap
+from nistreamer_backend import StreamerWrap as _StreamerWrap
 from .card import BaseCardProxy, AOCardProxy, DOCardProxy
 from typing import Optional, Literal, Union, Tuple, Type
 
@@ -15,7 +15,7 @@ class NIStreamer:
 
     def __init__(self):
         """Creates a new empty instance."""
-        self._streamer = StreamerWrap()
+        self._streamer = _StreamerWrap()
         self._ao_cards = dict()
         self._do_cards = dict()
 
@@ -51,10 +51,10 @@ class NIStreamer:
         """Base for ``add_card`` methods."""
 
         if card_type == 'AO':
-            streamer_method = StreamerWrap.add_ao_dev
+            streamer_method = _StreamerWrap.add_ao_dev
             target_dict = self._ao_cards
         elif card_type == 'DO':
-            streamer_method = StreamerWrap.add_do_dev
+            streamer_method = _StreamerWrap.add_do_dev
             target_dict = self._do_cards
         else:
             raise ValueError(f'Invalid card type "{card_type}". Valid type strings are "AO" and "DO"')
@@ -276,9 +276,9 @@ class NIStreamer:
 
         See Also:
 
-            :class:`StreamHandle`: for more details about advanced stream controls.
+            :class:`NIStreamer.StreamHandle`: for more details about stream controls.
         """
-        return ContextManager(streamer=self._streamer)
+        return self._ContextManager(streamer=self._streamer)
 
     def run(self, nreps: Optional[int] = 1):
         """Runs pulse sequence generation.
@@ -300,7 +300,7 @@ class NIStreamer:
 
             Repeating with no gap and rigid timing between iterations is possible with so-called
             *in-stream looping*. It is only accessible through the context-based interface.
-            See :meth:`init_stream` and :class:`StreamHandle` for more details.
+            See :meth:`init_stream` and :class:`NIStreamer.StreamHandle` for more details.
         """
         with self.init_stream() as stream_handle:
             for _ in range(nreps):
@@ -343,61 +343,62 @@ class NIStreamer:
         """Performs hardware reset on all cards that have been added to the streamer."""
         self._streamer.reset_all()
 
-
-class ContextManager:
-    """Using explicit context manager class instead of `contextlib.contextmanager` decorator
-    because it results in a shorter traceback from exceptions during `__enter__()`.
-    This is important - users will see an exception any time `init_stream()` fails due to invalid user settings.
-    """
-
-    def __init__(self, streamer):
-        self._streamer = streamer
-
-    def __enter__(self):
-        self._streamer.init_stream()
-        return StreamHandle(streamer=self._streamer)
-
-    def __exit__(self, *args, **kwargs):
-        self._streamer.close_stream()
-
-
-class StreamHandle:
-    def __init__(self, streamer):
-        self._streamer = streamer
-
-    def launch(self, instream_reps=1):
-        self._streamer.launch(instream_reps=instream_reps)
-
-    def wait_until_finished(self, timeout: Optional[float] = None):
-        """There are two modes available depending on `timeout` value.
-
-        "Basic" mode - `timeout = None` (default).
-        Blocks until run is finished, but is interruptable with `KeyboardInterrupt`.
-        Returns `None` when run is finished.
-
-        "Advanced" mode - `timeout: float` - timeout in seconds.
-        Blocks and returns `True` when run is finished or `False` if timeout elapses.
-        This mode can be used together with `reps_written_count()` to implement a "progress bar".
-
-        If there is a stream error, this method raises `RuntimeError` in either mode.
+    class _ContextManager:
+        """Using explicit context manager class instead of `contextlib.contextmanager` decorator
+        because it results in a shorter traceback from exceptions during `__enter__()`.
+        This is important - users will see an exception any time `init_stream()` fails due to invalid user settings.
         """
-        if timeout is None:
-            while True:
-                if self._streamer.wait_until_finished(timeout=1.0):
-                    break
-        else:
-            return self._streamer.wait_until_finished(timeout=timeout)
 
-    def request_stop(self):
-        """You do not need to use this function in most cases - leaving `with` context
-        while stream is still running will automatically request the stop and will wait
-        until the stream cleanly finishes before returning.
+        def __init__(self, streamer: _StreamerWrap):
+            self._streamer = streamer
 
-        This function is only exposed for possible advanced applications where you need
-        to break out of in-stream repetition loop and then want to re-launch the stream
-        again without spending extra time on redoing initialization."""
-        self._streamer.request_stop()
+        def __enter__(self):
+            # The actual stream initialization call to the back-end:
+            self._streamer.init_stream()
+            # If the above call returned without exceptions, stream has been successfully initialized.
+            # Return the handle for use in the `with` context body:
+            return NIStreamer.StreamHandle(streamer=self._streamer)
 
-    def reps_written_count(self):
-        return self._streamer.reps_written_count()
+        def __exit__(self, *args, **kwargs):
+            self._streamer.close_stream()
+
+    class StreamHandle:
+        def __init__(self, streamer: _StreamerWrap):
+            self._streamer = streamer
+
+        def launch(self, instream_reps=1):
+            self._streamer.launch(instream_reps=instream_reps)
+
+        def wait_until_finished(self, timeout: Optional[float] = None):
+            """There are two modes available depending on `timeout` value.
+
+            "Basic" mode - `timeout = None` (default).
+            Blocks until run is finished, but is interruptable with `KeyboardInterrupt`.
+            Returns `None` when run is finished.
+
+            "Advanced" mode - `timeout: float` - timeout in seconds.
+            Blocks and returns `True` when run is finished or `False` if timeout elapses.
+            This mode can be used together with `reps_written_count()` to implement a "progress bar".
+
+            If there is a stream error, this method raises `RuntimeError` in either mode.
+            """
+            if timeout is None:
+                while True:
+                    if self._streamer.wait_until_finished(timeout=1.0):
+                        break
+            else:
+                return self._streamer.wait_until_finished(timeout=timeout)
+
+        def request_stop(self):
+            """You do not need to use this function in most cases - leaving `with` context
+            while stream is still running will automatically request the stop and will wait
+            until the stream cleanly finishes before returning.
+
+            This function is only exposed for possible advanced applications where you need
+            to break out of in-stream repetition loop and then want to re-launch the stream
+            again without spending extra time on redoing initialization."""
+            self._streamer.request_stop()
+
+        def reps_written_count(self):
+            return self._streamer.reps_written_count()
 
