@@ -40,16 +40,6 @@ class NIStreamer:
             f'\t     Starts-last card: {self.starts_last}'
         )
 
-        # # FixMe: TypeError: Object of type AOCard is not JSON serializable
-        # return (
-        #     f'Experiment class.\n'
-        #     f'The following AO cards have been added already:\n'
-        #     f'{json.dumps(self._ao_card_dict, indent=4)}\n'
-        #     f'\n'
-        #     f'The following DO cards have been added already:\n'
-        #     f'{json.dumps(self._do_card_dict, indent=4)}'
-        # )
-
     def _add_card(
             self,
             card_type: Literal['AO', 'DO'],
