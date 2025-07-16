@@ -264,19 +264,25 @@ class NIStreamer:
     def init_stream(self):
         """Context-based stream initialization.
 
-        This function should only be used in the ``with`` context and is intended for
-        advanced cases. For basic streaming use :meth:`run` instead.
+        This function should only be used in the ``with`` context. The returned object
+        is a handle :class:`NIStreamer.StreamHandle` providing full stream control.
 
         Examples:
 
-            >>> with my_streamer.init_stream() as stream_handle:
+            >>> strmr = NIStreamer()
+            >>> # ... add cards/channels, add instructions, compile ...
+            >>> with strmr.init_stream() as stream_handle:
             >>>     stream_handle.launch(instream_reps=10)
             >>>     # Do some other logic while waiting ...
             >>>     stream_handle.wait_until_finished()
 
-        See Also:
+        Raises:
+            ValueError: if stream initialization fails due to invalid settings.
 
-            :class:`NIStreamer.StreamHandle`: for more details about stream controls.
+        See Also:
+            :class:`NIStreamer.StreamHandle` for more details about stream controls;
+
+            :meth:`run` - a more basic way of launching stream.
         """
         return self._ContextManager(streamer=self._streamer)
 
@@ -301,6 +307,10 @@ class NIStreamer:
             Repeating with no gap and rigid timing between iterations is possible with so-called
             *in-stream looping*. It is only accessible through the context-based interface.
             See :meth:`init_stream` and :class:`NIStreamer.StreamHandle` for more details.
+
+        See Also:
+            :meth:`NIStreamer.init_stream` and :class:`NIStreamer.StreamHandle`
+            for full stream control.
         """
         with self.init_stream() as stream_handle:
             for _ in range(nreps):
@@ -363,24 +373,102 @@ class NIStreamer:
             self._streamer.close_stream()
 
     class StreamHandle:
+        """Handle providing full stream control within ``with`` context.
+
+        The handle is obtained by initializing stream context (see :meth:`NIStreamer.init_stream`):
+
+            >>> strmr = NIStreamer()
+            >>> # ... add cards/channels, add instructions, compile ...
+            >>>
+            >>> # This is how you initialize stream context:
+            >>> with strmr.init_stream() as stream_handle:
+            >>>     # ... This is context body ...
+            >>>
+            >>>     # Use handle to control stream:
+            >>>     stream_handle.launch(instream_reps=10)
+            >>>
+            >>>     # Always wait for stream to finish:
+            >>>     stream_handle.wait_until_finished()
+            >>>
+            >>> # Stream will be closed automatically when leaving context
+        """
+
         def __init__(self, streamer: _StreamerWrap):
             self._streamer = streamer
 
         def launch(self, instream_reps=1):
+            """Launch sequence generation.
+
+            This call is *non-blocking* - returns immediately after generation starts.
+            You must always call :meth:`~NIStreamer.StreamHandle.wait_until_finished`
+            after launching to ensure generation is complete before making any further
+            stream actions.
+
+            Args:
+                instream_reps: number of in-stream repetitions. Plays once by default.
+
+            Raises:
+                RuntimeError: if attempting to launch stream while it is already running.
+
+            Notes:
+                *In-stream looping* is very different from basic *repeating by re-launching*
+                (see :meth:`NIStreamer.run`) - all iterations happen as a single continuous
+                stream without any gaps (but it is still interruptible between repetitions).
+
+                The limitation is that in-stream looping requires at least a minimal sequence
+                duration of :meth:`NIStreamer.chunksize_ms`. Shorter sequences can still be played with
+                ``instream_reps=1`` only or be repeated by re-launching.
+                Alternatively, one can concatenate several repetitions into a single sequence
+                to reach sufficient duration for in-stream looping to work.
+
+            See Also:
+                You must always call :meth:`~NIStreamer.StreamHandle.wait_until_finished`
+                after launching stream.
+            """
             self._streamer.launch(instream_reps=instream_reps)
 
-        def wait_until_finished(self, timeout: Optional[float] = None):
-            """There are two modes available depending on `timeout` value.
+        def wait_until_finished(self, timeout: Optional[float] = None) -> Union[bool, None]:
+            """Block to wait until generation is finished.
 
-            "Basic" mode - `timeout = None` (default).
-            Blocks until run is finished, but is interruptable with `KeyboardInterrupt`.
-            Returns `None` when run is finished.
+            Args:
+                timeout: wait time limit in seconds. ``None`` - wait indefinitely (default).
 
-            "Advanced" mode - `timeout: float` - timeout in seconds.
-            Blocks and returns `True` when run is finished or `False` if timeout elapses.
-            This mode can be used together with `reps_written_count()` to implement a "progress bar".
+            Returns:
+                In timed mode, ``Ture`` means generation finished, ``False`` means
+                still running when timeout elapsed. Basic mode returns ``None``.
 
-            If there is a stream error, this method raises `RuntimeError` in either mode.
+            Raises:
+                RuntimeError: if there is any stream error (underflow, overvoltage, sync signal loss)
+
+            Notes:
+                There are two modes depending on ``timeout`` value:
+
+                * Basic (``timeout=None``, default). Blocks and waits indefinitely until
+                  run is finished. Can be interrupted with ``KeyboardInterrupt``.
+                  Returns ``None`` when finished.
+
+                * Timed (``timeout: float``). Blocks and returns ``True`` if run is finished
+                  or ``False`` if timeout elapses before.
+
+            Examples:
+
+                >>> strmr = NIStreamer()
+                >>> # ... add cards/channels, add instructions, compile ...
+                >>>
+                >>> # Basic wait:
+                >>> with strmr.init_stream() as stream_handle:
+                >>>     stream_handle.launch(instream_reps=10)
+                >>>     stream_handle.wait_until_finished()
+                >>>
+                >>> # Timed wait - using to implement a minimal "progress bar":
+                >>> with strmr.init_stream() as stream_handle:
+                >>>     stream_handle.launch(instream_reps=10)
+                >>>     while True:
+                >>>         finished = stream_handle.wait_until_finished(timeout=1)
+                >>>         print(stream_handle.reps_written_count())
+                >>>         if finished:
+                >>>             break
+                >>>
             """
             if timeout is None:
                 while True:
