@@ -456,16 +456,16 @@ class NIStreamer:
                 >>> # ... add cards/channels, add instructions, compile ...
                 >>>
                 >>> # Basic wait:
-                >>> with strmr.init_stream() as stream_handle:
-                >>>     stream_handle.launch(instream_reps=10)
-                >>>     stream_handle.wait_until_finished()
+                >>> with strmr.init_stream() as handle:
+                >>>     handle.launch(instream_reps=10)
+                >>>     handle.wait_until_finished()
                 >>>
-                >>> # Timed wait - using to implement a minimal "progress bar":
-                >>> with strmr.init_stream() as stream_handle:
-                >>>     stream_handle.launch(instream_reps=10)
+                >>> # Timed wait - using to implement live progress printing:
+                >>> with strmr.init_stream() as handle:
+                >>>     handle.launch(instream_reps=10)
                 >>>     while True:
-                >>>         finished = stream_handle.wait_until_finished(timeout=1)
-                >>>         print(stream_handle.reps_written_count())
+                >>>         finished = handle.wait_until_finished(timeout=1)
+                >>>         print(handle.reps_written_count())
                 >>>         if finished:
                 >>>             break
                 >>>
@@ -478,15 +478,82 @@ class NIStreamer:
                 return self._streamer.wait_until_finished(timeout=timeout)
 
         def request_stop(self):
-            """You do not need to use this function in most cases - leaving `with` context
-            while stream is still running will automatically request the stop and will wait
-            until the stream cleanly finishes before returning.
+            """Request to stop in-stream loop without completing all repetitions.
 
-            This function is only exposed for possible advanced applications where you need
-            to break out of in-stream repetition loop and then want to re-launch the stream
-            again without spending extra time on redoing initialization."""
+            Streamer will complete the current repetition in progress and then stop.
+            You should call :meth:`~NIStreamer.StreamHandle.wait_until_finished` after
+            requesting stop to wait until the in-progress iteration is finished.
+
+            Notes:
+                Practically, you *do not* need to use this function in most cases - simply
+                leaving ``with`` context will automatically request stop and wait until
+                stream finishes before returning:
+
+                >>> import time
+                >>> strmr = NIStreamer()
+                >>> # ... add cards/channels, add instructions, compile ...
+                >>>
+                >>> # This will stop in-stream loop as well:
+                >>> with strmr.init_stream() as handle:
+                >>>     handle.launch(instream_reps=1000000)
+                >>>     time.sleep(10)
+                >>>
+                >>> # This will stop the loop whenever `KeyboardInterrupt` is emitted:
+                >>> with strmr.init_stream() as handle:
+                >>>     handle.launch(instream_reps=1000000)
+                >>>     handle.wait_until_finished()
+
+                This function is only exposed for advanced cases where you need
+                to break out of in-stream loop (e.g. due to some external condition)
+                and then launch the stream again without incurring re-init overhead:
+
+                >>> import time
+                >>> strmr = NIStreamer()
+                >>> # ... add cards/channels, add instructions, compile ...
+                >>>
+                >>> with strmr.init_stream() as handle:
+                >>>     handle.launch(instream_reps=1000000)
+                >>>     time.sleep(10)
+                >>>
+                >>>     # Now have to break the loop due to some condition:
+                >>>     handle.request_stop()
+                >>>     handle.wait_until_finished()
+                >>>
+                >>>     # Then launch again:
+                >>>     handle.launch(instream_reps=10)
+                >>>     handle.wait_until_finished()
+                >>>
+            """
             self._streamer.request_stop()
 
-        def reps_written_count(self):
+        def reps_written_count(self) -> int:
+            """Number of fully computed and transferred in-stream repetitions so far.
+
+            Notes:
+                This value DOES NOT show the current play position and cannot serve
+                as a reliable sync mechanism.
+
+                Samples are computed and written to cards before they are actually played.
+                So this value - the number of fully *written* repetitions - can be greater
+                than the actual number of fully *played* cycles. The two can differ
+                significantly, especially for very short sequences.
+
+                Instead, this value is meant to be a coarse progress indicator for
+                long-running in-stream loops (see example below).
+
+            Examples:
+                >>> strmr = NIStreamer()
+                >>> # ... add cards/channels, add instructions, compile ...
+                >>>
+                >>> # Timed wait + reps_written_count to implement live progress printing:
+                >>> with strmr.init_stream() as handle:
+                >>>     handle.launch(instream_reps=1000)
+                >>>     while True:
+                >>>         finished = handle.wait_until_finished(timeout=1)
+                >>>         print(handle.reps_written_count())
+                >>>         if finished:
+                >>>             break
+                >>>
+            """
             return self._streamer.reps_written_count()
 
