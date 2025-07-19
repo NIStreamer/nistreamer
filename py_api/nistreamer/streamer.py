@@ -265,7 +265,7 @@ class NIStreamer:
         """Context-based stream initialization.
 
         This function should only be used in the ``with`` context. The returned object
-        is a handle :class:`NIStreamer.StreamHandle` providing full stream control.
+        is a :class:`StreamHandle` instance providing full stream control.
 
         Examples:
 
@@ -280,7 +280,7 @@ class NIStreamer:
             ValueError: if stream initialization fails due to invalid settings.
 
         See Also:
-            :class:`NIStreamer.StreamHandle` for more details about stream controls;
+            :class:`StreamHandle` for more details about stream controls;
 
             :meth:`run` - a more basic way of launching stream.
         """
@@ -306,10 +306,10 @@ class NIStreamer:
 
             Repeating with no gap and rigid timing between iterations is possible with so-called
             *in-stream looping*. It is only accessible through the context-based interface.
-            See :meth:`init_stream` and :class:`NIStreamer.StreamHandle` for more details.
+            See :meth:`init_stream` and :class:`StreamHandle` for more details.
 
         See Also:
-            :meth:`NIStreamer.init_stream` and :class:`NIStreamer.StreamHandle`
+            :meth:`init_stream` and :class:`StreamHandle`
             for full stream control.
         """
         with self.init_stream() as stream_handle:
@@ -375,7 +375,7 @@ class NIStreamer:
     class StreamHandle:
         """Handle providing full stream control within ``with`` context.
 
-        The handle is obtained by initializing stream context (see :meth:`NIStreamer.init_stream`):
+        The handle is obtained by initializing stream context (see :meth:`~nistreamer.streamer.NIStreamer.init_stream`):
 
             >>> strmr = NIStreamer()
             >>> # ... add cards/channels, add instructions, compile ...
@@ -400,7 +400,7 @@ class NIStreamer:
             """Launch sequence generation.
 
             This call is *non-blocking* - returns immediately after generation starts.
-            You must always call :meth:`~NIStreamer.StreamHandle.wait_until_finished`
+            You must always call :meth:`~nistreamer.streamer.NIStreamer.StreamHandle.wait_until_finished`
             after launching to ensure generation is complete before making any further
             stream actions.
 
@@ -412,17 +412,18 @@ class NIStreamer:
 
             Notes:
                 *In-stream looping* is very different from basic *repeating by re-launching*
-                (see :meth:`NIStreamer.run`) - all iterations happen as a single continuous
-                stream without any gaps (but it is still interruptible between repetitions).
+                (see :meth:`~nistreamer.streamer.NIStreamer.run`) - all iterations happen as
+                a single continuous stream without any gaps (but it is still interruptible
+                between repetitions).
 
                 The limitation is that in-stream looping requires at least a minimal sequence
-                duration of :meth:`NIStreamer.chunksize_ms`. Shorter sequences can still be played with
+                duration of :meth:`~nistreamer.streamer.NIStreamer.chunksize_ms`. Shorter sequences can still be played with
                 ``instream_reps=1`` only or be repeated by re-launching.
                 Alternatively, one can concatenate several repetitions into a single sequence
                 to reach sufficient duration for in-stream looping to work.
 
             See Also:
-                You must always call :meth:`~NIStreamer.StreamHandle.wait_until_finished`
+                You must always call :meth:`~nistreamer.streamer.NIStreamer.StreamHandle.wait_until_finished`
                 after launching stream.
             """
             self._streamer.launch(instream_reps=instream_reps)
@@ -481,7 +482,7 @@ class NIStreamer:
             """Request to stop in-stream loop without completing all repetitions.
 
             Streamer will complete the current repetition in progress and then stop.
-            You should call :meth:`~NIStreamer.StreamHandle.wait_until_finished` after
+            You should call :meth:`~nistreamer.streamer.NIStreamer.StreamHandle.wait_until_finished` after
             requesting stop to wait until the in-progress iteration is finished.
 
             Notes:
