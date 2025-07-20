@@ -336,8 +336,8 @@ class NIStreamer:
 
         Args:
             reset_time: the time at which to add the reset instruction
-                (the same for all channels). If ``None``, the last instruction
-                end time across all channels is determined and used.
+                (the same for all channels). If ``None``, the latest last
+                instruction end time from across all channels is used.
 
         Raises:
             ValueError: if requested ``reset_time`` is below the last
