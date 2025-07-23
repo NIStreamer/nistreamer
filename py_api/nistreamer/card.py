@@ -16,12 +16,11 @@ class BaseCardProxy:
     Exposes hardware settings and device-wide control.
     """
 
-    def __init__(
-            self,
-            _streamer: _StreamerWrap,
-            max_name: str,
-            nickname=None
-    ):
+    def __init__(self,
+                 _streamer: _StreamerWrap,
+                 max_name: str,
+                 nickname=None):
+
         self._streamer = _streamer
         self.max_name = max_name
         self._nickname = nickname
@@ -193,14 +192,12 @@ class AOCardProxy(BaseCardProxy):
     def __repr__(self):
         return 'AO card ' + super().__repr__()
 
-    def add_chan(
-            self,
-            chan_idx: int,
-            dflt_val: float = 0.0,
-            rst_val: float = 0.0,
-            nickname: str = None,
-            proxy_class: Optional[Type[AOChanProxy]] = AOChanProxy
-    ):
+    def add_chan(self,
+                 chan_idx: int,
+                 dflt_val: float = 0.0,
+                 rst_val: float = 0.0,
+                 nickname: str = None,
+                 proxy_class: Optional[Type[AOChanProxy]] = AOChanProxy):
         """Add an output channel.
 
         Args:
@@ -239,15 +236,13 @@ class DOCardProxy(BaseCardProxy):
     def __repr__(self):
         return 'DO card ' + super().__repr__() + f'\n\n\tConst fns only: {self.const_fns_only}'
 
-    def add_chan(
-            self,
-            port_idx: int,
-            line_idx: int,
-            dflt_val: bool = False,
-            rst_val: bool = False,
-            nickname: str = None,
-            proxy_class: Optional[Type[DOChanProxy]] = DOChanProxy
-    ):
+    def add_chan(self,
+                 port_idx: int,
+                 line_idx: int,
+                 dflt_val: bool = False,
+                 rst_val: bool = False,
+                 nickname: str = None,
+                 proxy_class: Optional[Type[DOChanProxy]] = DOChanProxy):
         """Add an output channel.
 
         Args:
@@ -289,7 +284,7 @@ class DOCardProxy(BaseCardProxy):
 
         If enabled, all lines on this card will only accept the following
         constant-valued instructions: ``high``, ``low``, ``go_high``, and ``go_low``.
-        But this restriction allows to accelerate the runtime sample computation
+        This restriction allows to accelerate the runtime sample computation
         and significantly reduce the risk of buffer underflow.
 
         In most cases, only constant-valued instructions are used anyway,

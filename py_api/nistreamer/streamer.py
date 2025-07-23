@@ -1,6 +1,6 @@
 """Streamer module.
 
-Contains the main ``NIStreamer`` class, as well as ``StreamHandle`` class
+Contains the main ``NIStreamer`` class, as well as ``StreamHandle`` inner class
 for stream control in ``with`` context.
 """
 
@@ -40,14 +40,12 @@ class NIStreamer:
             f'\t     Starts-last card: {self.starts_last}'
         )
 
-    def _add_card(
-            self,
-            card_type: Literal['AO', 'DO'],
-            max_name: str,
-            samp_rate: float,
-            proxy_class: Type[BaseCardProxy],
-            nickname: Optional[str] = None,
-     ) -> BaseCardProxy:
+    def _add_card(self,
+                  card_type: Literal['AO', 'DO'],
+                  max_name: str,
+                  samp_rate: float,
+                  proxy_class: Type[BaseCardProxy],
+                  nickname: Optional[str] = None) -> BaseCardProxy:
         """Base for ``add_card`` methods."""
 
         if card_type == 'AO':
@@ -74,13 +72,11 @@ class NIStreamer:
         target_dict[max_name] = proxy
         return proxy
 
-    def add_ao_card(
-            self,
-            max_name: str,
-            samp_rate: float,
-            nickname: Optional[str] = None,
-            proxy_class: Optional[Type[BaseCardProxy]] = AOCardProxy
-    ):
+    def add_ao_card(self,
+                    max_name: str,
+                    samp_rate: float,
+                    nickname: Optional[str] = None,
+                    proxy_class: Optional[Type[BaseCardProxy]] = AOCardProxy):
         """Add an analog output card.
 
         Args:
@@ -103,13 +99,11 @@ class NIStreamer:
             proxy_class=proxy_class
         )
 
-    def add_do_card(
-            self,
-            max_name: str,
-            samp_rate: float,
-            nickname: Optional[str] = None,
-            proxy_class: Optional[Type[BaseCardProxy]] = DOCardProxy
-    ):
+    def add_do_card(self,
+                    max_name: str,
+                    samp_rate: float,
+                    nickname: Optional[str] = None,
+                    proxy_class: Optional[Type[BaseCardProxy]] = DOCardProxy):
         """Add a digital output card.
 
         Args:
@@ -354,9 +348,12 @@ class NIStreamer:
         self._streamer.reset_all()
 
     class _ContextManager:
-        """Using explicit context manager class instead of `contextlib.contextmanager` decorator
-        because it results in a shorter traceback from exceptions during `__enter__()`.
-        This is important - users will see an exception any time `init_stream()` fails due to invalid user settings.
+        """Stream ``with`` context manager.
+
+        Using an explicit context manager class instead of ``contextlib.contextmanager``
+        decorator because it results in a simpler traceback from exceptions during
+        ``__enter__()``. This is important since users will see an exception any time
+        ``init_stream()`` fails due to invalid user settings.
         """
 
         def __init__(self, streamer: _StreamerWrap):
