@@ -20,10 +20,8 @@ See the `demo notebooks <https://github.com/pulse-streamer/ni-streamer/tree/main
     :caption: Contents:
 
     installation
-    usage/index
     api/index
     limitations
-    internals/index
 
 
 

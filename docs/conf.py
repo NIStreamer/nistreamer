@@ -26,6 +26,7 @@ extensions = [
     'sphinx_autodoc_typehints',
 ]
 autodoc_mock_imports = ['nistreamer_backend', 'numpy']
+autodoc_member_order = "bysource"
 autosummary_generate = True
 napoleon_google_docstring = True
 napoleon_use_seealso = True
@@ -38,6 +39,3 @@ exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 html_theme = 'sphinx_rtd_theme'  # alabaster
 html_static_path = ['_static']
-# html_css_files = [
-#     'custom.css',
-# ]
