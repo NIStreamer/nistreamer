@@ -90,3 +90,10 @@ Channels
     :members:
     :undoc-members:
     :show-inheritance:
+
+Utils
+-----
+
+.. automodule:: nistreamer.utils
+    :members:
+    :undoc-members:

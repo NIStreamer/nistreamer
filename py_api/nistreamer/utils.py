@@ -1,7 +1,10 @@
+"""Miscellaneous helper tools."""
+
+from nistreamer_backend import connect_terms as _connect_terms
+from nistreamer_backend import disconnect_terms as _disconnect_terms
+from nistreamer_backend import reset_dev as _reset_dev
 import numpy as np
-from nistreamer_backend import connect_terms as raw_connect_terms
-from nistreamer_backend import disconnect_terms as raw_disconnect_terms
-from nistreamer_backend import reset_dev as raw_reset_dev
+from typing import Union, Optional
 # Import plotly
 PLOTLY_INSTALLED = False
 try:
@@ -18,20 +21,74 @@ except ImportError:
 
 # region NI DAQmx functions
 def connect_terms(src: str, dest: str):
-    """Statically (independently of any NI task) connect terminals
+    """Create a static connection between terminals.
 
-    :param src:
-    :param dest:
-    :return:
+    *Hint:* you can find the list of available terminals and signals as well
+    as permitted routes for each card using NI MAX app. Click the specific
+    card entry in the device tree on the left, then hit the "Device Routes"
+    tab on the bottom of the window.
+
+    **CAUTION!** Static conntections are independent of any NI tasks and will
+    persist until explicily undone, involved cards are reset, or the full system
+    is power-cycled. If left behind, such static connections can lead to physical
+    line double-driving, very confusing sync issues, and even hardware damage.
+
+    Args:
+        src: full source terminal or signal name
+        dest: full destination terminal name
+
+    Raises:
+        ValueError: if any terminal name is invalid or if the connection cannot be established.
+
+    Examples:
+        >>> connect_terms(src='/Dev1/PFI0', dest='/Dev1/PXI_Trig0')
+        >>> connect_terms(src='/Dev2/10MHzRefClock', dest='/Dev2/PFI0')
+
+    See Also:
+         Use :meth:`disconnect_terms` or :meth:`reset_dev` to undo static connections.
     """
-    return raw_connect_terms(src=src, dest=dest)
+    return _connect_terms(src=src, dest=dest)
 
 
 def disconnect_terms(src: str, dest: str):
-    return raw_disconnect_terms(src=src, dest=dest)
+    """Undo static connection.
+
+    Args:
+        src: full source terminal or signal name
+        dest: full destination terminal name
+
+    Raises:
+        ValueError: if any terminal name is invalid.
+    """
+    return _disconnect_terms(src=src, dest=dest)
 
 
 def share_10mhz_ref(dev: str, term: str):
+    """Statically export 10 MHz reference clock signal.
+
+    **CAUTION!** Static conntections are independent of any NI tasks and will
+    persist until explicily undone, involved cards are reset, or the full system
+    is power-cycled. If left behind, such static connections can lead to physical
+    line double-driving, very confusing sync issues, and even hardware damage.
+
+    Args:
+        dev: device name
+        term: terminal name
+
+    Raises:
+        ValueError: if parameters are invalid
+
+    Examples:
+        >>> share_10mhz_ref(dev='Dev1', term='PFI0')
+
+    See Also:
+        Consider using a safer way of 10 MHz reference export by setting
+        :meth:`~nistreamer.streamer.NIStreamer.ref_clk_provider` property.
+        This will automatically undo export when run is finished.
+
+        If still choosing manual approach, use :meth:`unshare_10mhz_ref`
+        or :meth:`reset_dev` to undo this export afterwards.
+    """
     connect_terms(
         src=f'/{dev}/10MHzRefClock',
         dest=f'/{dev}/{term}'
@@ -39,6 +96,15 @@ def share_10mhz_ref(dev: str, term: str):
 
 
 def unshare_10mhz_ref(dev: str, term: str):
+    """Undo static export of 10 MHz reference clock signal.
+
+    Args:
+        dev: device name
+        term: terminal name
+
+    Raises:
+        ValueError: if parameters are invalid
+    """
     disconnect_terms(
         src=f'/{dev}/10MHzRefClock',
         dest=f'/{dev}/{term}'
@@ -46,34 +112,70 @@ def unshare_10mhz_ref(dev: str, term: str):
 
 
 def reset_dev(name: str):
-    return raw_reset_dev(name=name)
+    """Perform hardware reset.
+
+    Args:
+        name: device name as shown in NI MAX
+    """
+    return _reset_dev(name=name)
 # endregion
 
 
 # region iplot
 class RendOption:
+    """Enum-like collection of select Plotly renderer options.
 
-    # Available renderers (from https://plotly.com/python/renderers/):
-    #         ['plotly_mimetype', 'jupyterlab', 'nteract', 'vscode',
-    #          'notebook', 'notebook_connected', 'kaggle', 'azure', 'colab',
-    #          'cocalc', 'databricks', 'json', 'png', 'jpeg', 'jpg', 'svg',
-    #          'pdf', 'browser', 'firefox', 'chrome', 'chromium', 'iframe',
-    #          'iframe_connected', 'sphinx_gallery', 'sphinx_gallery_png']
-
+    See `Plotly docs <https://plotly.com/python/renderers/>`_
+    for the full list of available renderers.
+    """
     browser = 'browser'
     notebook = 'notebook'
+    svg = 'svg'
+    png = 'png'
+    jpeg = 'jpeg'
 
 
-def iplot(chan_list, start_time=None, end_time=None, nsamps=1000, renderer='browser', row_height=None):
+def iplot(chan_list,
+          start_time: Union[float, None] = None,
+          end_time: Union[float, None] = None,
+          nsamps: Optional[int] = 1000,
+          renderer: Optional[str] = 'browser',
+          row_height: Union[float, None] = None):
+    """Plot signals for a list of channels.
+
+    Values are computed for a grid of ``nsamps`` time points uniformly
+    distributed over the closed interval ``[start_time, end_time]``.
+    Note that sequence has to be freshly compiled to plot.
+
+    Args:
+        chan_list: list of channel proxy instances to plot (trace order will follow the list order)
+        start_time: window start time. If ``None``, zero time is used
+        end_time: window end time. If ``None``, compiled sequence end time is used
+        nsamps: number of time points to evaluate for each channel
+        renderer: Plotly renderer to use. A few options are collected in :class:`RendOption`
+        row_height: channel sub-plot height
+
+    Raises:
+        ImportError: if ``plotly`` is not installed
+        ValueError: if sequence is not freshly compiled or any parameters are invalid
+
+    Notes:
+        You may need to select a sufficiently large ``nsamps`` and a sufficiently
+        narrow time window to see the true waveform shape that the actual stream
+        would produce when sampling at the hardware clock rate. Otherwise, very
+        narrow pulses may be missed and periodic waveforms may appear distorted
+        due to undersampling.
+    """
     if not PLOTLY_INSTALLED:
         raise ImportError('Plotly package is not installed. Run `pip install plotly` to get it.')
 
-    # FixMe: this is a dirty hack.
-    #  Consider making this function a method of NIStreamer class to get clear access to streamer_wrap
-    streamer_wrap = chan_list[0]._streamer
-
+    # Sanity checks:
+    if len(chan_list) == 0:
+        raise ValueError("Channel list is empty")
+    streamer_wrap = chan_list[0]._streamer  # FixMe: this is a dirty hack. Consider making this function a method of NIStreamer class to get clear access to streamer_wrap
     streamer_wrap.validate_compile_cache()
 
+    # Process window start/end times
     total_run_time = streamer_wrap.shortest_dev_run_time()
     if start_time is not None:
         if start_time > total_run_time:
@@ -91,11 +193,6 @@ def iplot(chan_list, start_time=None, end_time=None, nsamps=1000, renderer='brow
         raise ValueError(f"Requested start_time={start_time} exceeds end_time={end_time}")
 
     t_arr = np.linspace(start_time, end_time, nsamps)
-
-    # ToDo:
-    #   `src_pwr` (`slow_ao_card.ao0`) did not receive any instructions, resulting in this error
-    #   PanicException: Attempting to calculate signal on not-compiled channel ao0
-    #   Try checking edit cache with `is_edited`
 
     chan_num = len(chan_list)
     nsamps = int(nsamps)

@@ -191,10 +191,11 @@ class NIStreamer:
             provider. It does not have to be active (get some instructions)
             or even be registered in the streamer.
 
-            (2) If this mechanism is not sufficient, you can manually do a
-            static export from any card by calling ``utils.share_10mhz_ref()``.
+            (2) If this mechanism is not sufficient, you can manually do a static
+            export from any card by calling :meth:`~nistreamer.utils.share_10mhz_ref()`.
             However, such export will not be undone automatically - you should
-            manually call ``utils.unshare_10mhz_ref()`` or ``utils.reset_dev()``.
+            manually call :meth:`~nistreamer.utils.unshare_10mhz_ref()` or
+            :meth:`~nistreamer.utils.reset_dev()`.
 
             Forgetting to undo manual export is very easy and dangerous -
             the exporter card will continue silently feeding the signal until
