@@ -4,11 +4,11 @@
 
 Maximal sampling rate is limited by NI hardware specifications. Refer to the data sheets for details.
   
-  | Model (output type)    | Limit                                                                                   |
-  |------------------------|-----------------------------------------------------------------------------------------|
-  | PCIe/PXIe-6738 (AO)    | Either all 32 channels at up to 400 kSa/s or only 8 channels at up to 1 MSa/s           |
-  | PCIe/PXIe-6535 (DO)    | All 32 channels at up to 10 MSa/s                                                       |
-  | PCIe/PXIe-6363 (AO/DO) | DO - up to 10 MSa/s. AO - all 4 channels at up to 1.25 MSa/s, higher for fewer channels |
+  | Model (output type)    | Limit                                                                                  |
+  |------------------------|----------------------------------------------------------------------------------------|
+  | PCIe/PXIe-6738 (AO)    | Either all 32 channels at up to 400 kSa/s or only 8 channels at up to 1 MSa/s          |
+  | PCIe/PXIe-6535 (DO)    | All 32 channels at up to 10 MSa/s                                                      |
+  | PCIe/PXIe-6363 (AO/DO) | DO: up to 10 MSa/s. AO: all 4 channels at up to 1.25 MSa/s (higher for fewer channels) |
 
 ## Outputs only
 
