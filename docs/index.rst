@@ -37,9 +37,5 @@ See the `demo notebooks <https://github.com/pulse-streamer/ni-streamer/tree/main
     :maxdepth: 2
     :caption: Contents:
 
-    installation
+    getting_started/index
     api/index
-    limitations
-
-
-

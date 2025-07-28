@@ -28,72 +28,12 @@ within ``with`` context.
 
    <hr>
 
-.. autoclass:: nistreamer.streamer.NIStreamer
-    :members:
-    :undoc-members:
-    :exclude-members: StreamHandle
+.. toctree::
+    :maxdepth: 2
+    :caption: Contents:
 
-.. raw:: html
-
-   <hr>
-
-.. autoclass:: nistreamer.streamer.NIStreamer.StreamHandle
-    :members:
-    :undoc-members:
-
-Cards
------
-
-.. autoclass:: nistreamer.card.BaseCardProxy
-    :members:
-    :undoc-members:
-
-.. raw:: html
-
-   <hr>
-
-.. autoclass:: nistreamer.card.AOCardProxy
-    :members:
-    :undoc-members:
-    :show-inheritance:
-
-.. raw:: html
-
-   <hr>
-
-.. autoclass:: nistreamer.card.DOCardProxy
-    :members:
-    :undoc-members:
-    :show-inheritance:
-
-Channels
---------
-
-.. autoclass:: nistreamer.channel.BaseChanProxy
-    :members:
-    :undoc-members:
-
-.. raw:: html
-
-   <hr>
-
-.. autoclass:: nistreamer.channel.AOChanProxy
-    :members:
-    :undoc-members:
-    :show-inheritance:
-
-.. raw:: html
-
-   <hr>
-
-.. autoclass:: nistreamer.channel.DOChanProxy
-    :members:
-    :undoc-members:
-    :show-inheritance:
-
-Utils
------
-
-.. automodule:: nistreamer.utils
-    :members:
-    :undoc-members:
+    streamer
+    card
+    channel
+    stream_handle
+    utils
