@@ -33,7 +33,7 @@ napoleon_use_seealso = True
 myst_enable_extensions = ["colon_fence"]
 nb_execution_mode = "off"  # Don't execute notebooks on build
 templates_path = ['_templates']
-exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
+exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store', 'building_docs_locally.md']
 
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
