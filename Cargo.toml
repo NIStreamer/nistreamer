@@ -15,8 +15,8 @@ name = "main"
 path = "src/main.rs"
 
 [dependencies]
-base_streamer = { path = "../../base-streamer" }
-usr_fn_lib = { path = "../../usr-fn-lib", optional = true }
+base_streamer = { path = "../base-streamer" }
+usr_fn_lib = { path = "../usr-fn-lib", optional = true }
 indexmap = "2.3.0"
 pyo3 = { version = "0.22.1", features = ["multiple-pymethods"] }  # "extension-module"
 libc = "0.2.147"
