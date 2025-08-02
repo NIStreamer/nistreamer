@@ -4,8 +4,8 @@ Contains the ``BaseChanProxy`` and ``AO/DOChanProxy`` classes
 representing individual channels.
 """
 
-from nistreamer_backend import StreamerWrap as _StreamerWrap
-from nistreamer_backend import StdFnLib
+from ._nistreamer import StreamerWrap as _StreamerWrap
+from ._nistreamer import StdFnLib
 from abc import ABC, abstractmethod
 from typing import Optional, Union
 import math

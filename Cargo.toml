@@ -1,13 +1,13 @@
 [package]
-name = "nistreamer_backend"
+name = "_nistreamer"
 version = "0.1.0"
 edition = "2021"
-description = "An extension of base_streamer defining streaming behavior on National Instrument (NI) devices."
+description = "Rust back-end of nistreamer package."
 license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
-name = "nistreamer_backend"
+name = "_nistreamer"
 crate-type = ["cdylib", "lib"]
 
 [[bin]]

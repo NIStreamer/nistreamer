@@ -154,7 +154,7 @@ use usr_fn_lib::UsrFnLib;
 use crate::flat_wrap::StreamerWrap;
 
 #[pymodule]
-fn nistreamer_backend(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _nistreamer(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<StreamerWrap>()?;
     m.add_class::<StdFnLib>()?;
     m.add_function(wrap_pyfunction!(reset_dev, m)?)?;

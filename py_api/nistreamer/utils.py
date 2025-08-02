@@ -1,8 +1,8 @@
 """Miscellaneous helper tools."""
 
-from nistreamer_backend import connect_terms as _connect_terms
-from nistreamer_backend import disconnect_terms as _disconnect_terms
-from nistreamer_backend import reset_dev as _reset_dev
+from ._nistreamer import connect_terms as _connect_terms
+from ._nistreamer import disconnect_terms as _disconnect_terms
+from ._nistreamer import reset_dev as _reset_dev
 import numpy as np
 from typing import Union, Optional
 # Import plotly
