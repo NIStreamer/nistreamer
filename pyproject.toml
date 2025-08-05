@@ -5,12 +5,24 @@ build-backend = "maturin"
 [project]
 name = "nistreamer"
 version = "0.1.0"
+requires-python = ">=3.7"
+dependencies = ["numpy", "plotly"]
 description = "An abstraction layer providing a Python API for scripted pulse sequence generation with National Instruments hardware."
 authors = [{ name = "NIStreamer project contributors" }]
 license = "MIT"
 readme = "README.md"
-requires-python = ">=3.7"
-dependencies = ["numpy", "plotly"]
+keywords = ["pulse sequence", "experiment control", "experiment automation", "National Instruments", "NI DAQ"]
+classifiers = [
+    "Programming Language :: Python",
+    "Programming Language :: Rust",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering",
+]
+
+[project.urls]
+Documentation = "https://nistreamer.readthedocs.io"
+GitHub = "https://github.com/pulse-streamer"
+Issues = "https://github.com/pulse-streamer/ni-streamer/issues"
 
 [tool.maturin]
 python-source = "py_api"  # Location of `nistreamer` Python front-end
