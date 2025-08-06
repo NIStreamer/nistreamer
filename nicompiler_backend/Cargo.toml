@@ -1,0 +1,26 @@
+[package]
+name = "base_streamer"
+version = "0.4.0"
+edition = "2021"
+description = "A backend interface for National Instrument (NI) integration, offering streamlined experimental control systems with Rust's performance and safety guarantees."
+license = "MIT"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "base_streamer"
+crate-type = ["lib"] # Specify the "lib" to make it usable for other rust libraries
+
+#[[bin]]
+#name = "test_bin"
+#path = "src/main.rs"
+#
+#[[bin]]
+#name = "unittest"
+#path = "src/unittest.rs"
+
+[dependencies]
+fn_lib_macros = { path = "src/fn_lib_tools/macros" }  # use `features = ["debug_token_print"]` to print macro-generated tokens during compilation
+ndarray = "0.15.6"
+pyo3 = { version = "0.22.1", features = ["multiple-pymethods"] }  # "extension-module"
+indexmap = "2.3.0"
+itertools = "0.14.0"
