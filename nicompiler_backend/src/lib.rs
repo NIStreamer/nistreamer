@@ -179,25 +179,14 @@
 //!
 //! We encourage users to explore each module to fully grasp the capabilities and structure of the crate. Whether you're here for a quick setup or to contribute, the `nicompiler_backend` crate is designed to cater to both needs.
 
-use pyo3::prelude::*;
-// use pyo3::wrap_pyfunction;
+extern crate ndarray;
+extern crate indexmap;
+extern crate itertools;
 
+pub mod fn_lib_tools;
+pub mod instruction;
 pub mod channel;
 pub mod device;
-pub mod experiment;
-pub mod instruction;
-pub mod utils;
+pub mod streamer;
 
-// ToDo: restrict public API access to the following functions:
-//  - mutable field accessors
-pub use channel::*;
-pub use device::*;
-pub use experiment::*;
-pub use instruction::*;
-pub use utils::*;
-
-#[pymodule]
-fn nicompiler_backend(_py: Python, m: &PyModule) -> PyResult<()> {
-    m.add_class::<Experiment>()?;
-    Ok(())
-}
+pub use fn_lib_tools::usr_lib_prelude;

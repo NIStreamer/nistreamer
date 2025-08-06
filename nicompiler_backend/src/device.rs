@@ -32,14 +32,10 @@
 //!
 //! [`channel` module]: crate::channel
 
-use ndarray::{s, Array1, Array2};
-use regex::Regex;
-use std::collections::BTreeSet;
+use ndarray::Array1;
 use indexmap::IndexMap;
-
-use crate::channel::*;
-use crate::instruction::*;
-use crate::utils::*;
+use itertools::Itertools;
+use crate::channel::BaseChan;
 
 /// The `BaseDevice` trait defines the fundamental operations and attributes of a National Instruments (NI) device.
 ///
@@ -80,184 +76,130 @@ use crate::utils::*;
 /// # Implementing [`BaseDevice`]:
 ///
 /// When creating a new type that represents an NI device, implementing this trait ensures that the type has all the necessary methods and behaviors typical of NI devices. Implementers can then extend or override these methods as necessary to provide device-specific behavior or optimizations.
-pub trait BaseDevice {
-    // ToDo: this is a temporary dirty fix. Remove after crate merge
-    //  BaseDevice does not need to include anything about hardware settings
-    fn get_start_trig_in(&self) -> Option<String>;
-    fn get_start_trig_out(&self) -> Option<String>;
-    fn get_samp_clk_in(&self) -> Option<String>;
-    fn get_samp_clk_out(&self) -> Option<String>;
-    fn get_ref_clk_in(&self) -> Option<String>;
-    fn get_min_bufwrite_timeout(&self) -> Option<f64>;
-    // ToDo: this is a temporary dirty fix. Remove after crate merge
+pub trait BaseDev {
+    /// Output channel type
+    type Chan: BaseChan;
 
-    // Immutable accessors (getters)
-    fn channels(&self) -> &IndexMap<String, Channel>;
-    fn name(&self) -> &str;
-    fn task_type(&self) -> TaskType;
+    // Field methods
+    fn name(&self) -> String;
     fn samp_rate(&self) -> f64;
 
-    // Mutable accessors
-    fn channels_(&mut self) -> &mut IndexMap<String, Channel>;
+    fn chans(&self) -> Vec<&Self::Chan>;
+    fn chans_mut(&mut self) -> Vec<&mut Self::Chan>;
 
     /// Shortcut to borrow channel instance by name
-    fn chan(&self, name: &str) -> &Channel {
-        if !self.channels().contains_key(name) {
-            panic!("Device {} does not have channel {}", self.name(), name)
+    fn chan(&self, name: &str) -> Result<&Self::Chan, String> {
+        let search_idx = self.chans().iter().position(|chan| chan.name() == name.to_string());
+
+        if let Some(idx) = search_idx {
+            Ok(self.chans().swap_remove(idx))
+        } else {
+            Err(format!("Device {} does not have channel {name}", self.name()))
         }
-        self.channels().get(name).unwrap()
     }
     /// Shortcut to mutably borrow channel instance by name
-    fn chan_(&mut self, name: &str) -> &mut Channel {
-        if !self.channels().contains_key(name) {
-            panic!("Device {} does not have channel {}", self.name(), name)
+    fn chan_mut(&mut self, name: &str) -> Result<&mut Self::Chan, String> {
+        let search_res = self.chans().iter().position(|chan| chan.name() == name.to_string());
+
+        if let Some(idx) = search_res {
+            Ok(self.chans_mut().swap_remove(idx))
+        } else {
+            Err(format!("Device {} does not have channel {name}", self.name()))
         }
-        self.channels_().get_mut(name).unwrap()
     }
 
     /// Returns sample clock period calculated as `1.0 / self.samp_rate()`
-    fn clock_period(&self) -> f64 {
+    fn clk_period(&self) -> f64 {
         1.0 / self.samp_rate()
     }
 
-    /// Returns a vector of references to editable channels
-    fn editable_channels(&self) -> Vec<&Channel> {
-        self.channels()
-            .values()
-            .filter(|&chan| chan.editable())
-            .collect()
-    }
-    /// Returns a vector of mutable references to editable channels
-    fn editable_channels_(&mut self) -> Vec<&mut Channel> {
-        self.channels_()
-            .values_mut()
-            .filter(|chan| (*chan).editable())
-            .collect()
-    }
-
     /// Adds a new channel to the device.
-    ///
-    /// This base method validates the provided `name` based on the device's `task_type`
-    /// to ensure it adheres to the expected naming convention for the respective task type.
-    ///
-    /// # Naming Conventions:
-    /// - For `TaskType::AO`: Channels should be named following the pattern "ao(number)"
-    ///   (e.g., "ao0", "ao1").
-    /// - For `TaskType::DO`: Channels should be named following the pattern "port(number)/line(number)"
-    ///   (e.g., "port0/line1").
-    ///
-    /// # Panics
-    /// - If the provided `name` does not adhere to the expected naming convention for the
-    ///   associated task type.
-    /// - If a channel with the same `name` already exists within the device.
-    ///
-    /// # Arguments
-    /// - `name`: Name of the channel as seen by the NI driver, which must adhere to the
-    ///   naming conventions detailed above.
-    /// - `default_value`: a f64 value which specifies signal value for not explicitly defined intervals. 
-    fn add_channel(&mut self, name: &str, default_value: f64) {
-        // Check the name format
-        let (name_match_string, name_format_description) = match self.task_type() {
-            TaskType::AO => (String::from(r"^ao\d+$"), String::from("ao(number)")),
-            TaskType::DO => (
-                String::from(r"^port\d+/line\d+$"),
-                String::from("port(number)/line(number)"),
-            ),
+    fn check_can_add_chan(&mut self, chan: &Self::Chan) -> Result<(), String> {
+        if f64::abs(chan.samp_rate() - self.samp_rate()) >= 1e-10 {
+            return Err(format!(
+                "Cannot add channel {} with samp_rate={} to device {} with a different samp_rate={}",
+                chan.name(), chan.samp_rate(), self.name(), self.samp_rate()
+            ))
         };
-
-        let re = Regex::new(&name_match_string).unwrap();
-        if !re.is_match(name) {
-            panic!(
-                "Expecting channels to be of format '{}' yet received channel name {}",
-                name_format_description, name
-            );
-        }
-        for channel in self.channels().values() {
-            if channel.name() == name {
-                panic!(
-                    "Physical name of channel {} already registered. Registered channels are {:?}",
-                    name,
-                    self.channels()
-                        .values()
-                        .map(|c| c.name())
-                        .collect::<Vec<_>>()
-                );
-            }
-        }
-        let new_channel = Channel::new(self.task_type(), name, self.samp_rate(), default_value);
-        self.channels_().insert(name.to_string(), new_channel);
+        let chan_names: Vec<_> = self.chans().iter().map(|chan| chan.name()).collect();
+        if chan_names.contains(&chan.name()) {
+            return Err(format!(
+                "There is already a channel with name {} registered. Registered channels are {:?}",
+                chan.name(), chan_names
+            ))
+        };
+        Ok(())
     }
 
-    fn add_reset_instr(&mut self, reset_time: f64) {
+    fn add_reset_instr(&mut self, reset_time: f64) -> Result<(), String> {
         let reset_pos = (reset_time * self.samp_rate()).round() as usize;
-        if reset_pos < self.last_instr_end_pos() {
-            panic!(
-                "Given reset_time {reset_time} was rounded to {reset_pos} clock cycles \
-                which is below the last instruction end_pos {}",
-                self.last_instr_end_pos()
-            )
+
+        // Sanity check - reset_pos does not clip any existing instructions
+        if self.last_instr_end_pos().is_some_and(|last_instr_end| reset_pos < last_instr_end) {
+            return Err(format!(
+                "[Device {}] given reset_time {reset_time} was rounded to {reset_pos} clock cycles \
+                which is below the last instruction end position {}",
+                self.name(), self.last_instr_end_pos().unwrap()
+            ))
         }
-        for chan in self.editable_channels_().iter_mut() {  // ToDo when splitting AO/DO types: remove `editable` filter
-            chan.add_reset_instr(reset_pos)
-        }
+
+        for chan in self.chans_mut() {
+            chan.add_reset_instr(reset_pos)?
+        };
+        Ok(())
     }
 
-    /// A device is compiled if any of its editable channels are compiled.
-    /// Also see [`BaseChannel::is_compiled`]
-    fn is_compiled(&self) -> bool {
-        self.editable_channels()
-            .iter()
-            .any(|channel| channel.is_compiled())
-    }
     /// A device is marked edited if any of its editable channels are edited.
     /// Also see [`BaseChannel::is_edited`]
-    fn is_edited(&self) -> bool {
-        self.editable_channels()
-            .iter()
-            .any(|channel| channel.is_edited())
+    fn got_instructions(&self) -> bool {
+        self.chans().iter().any(|chan| chan.got_instructions())
     }
-    /// A device is marked fresh-compiled if all if its editable channels are freshly compiled.
-    /// Also see [`BaseChannel::is_fresh_compiled`]
-    fn is_fresh_compiled(&self) -> bool {
-        self.editable_channels()
-            .iter()
-            .all(|channel| channel.is_fresh_compiled())
+
+    fn active_chans(&self) -> Vec<&Self::Chan> {
+        self.chans()
+            .drain(..)
+            .filter(|chan| chan.got_instructions())
+            .collect()
     }
+
+    fn active_chans_mut(&mut self) -> Vec<&mut Self::Chan> {
+        self.chans_mut()
+            .drain(..)
+            .filter(|chan| chan.got_instructions())
+            .collect()
+    }
+
     /// Clears the edit-cache fields for all channels.
     /// Also see [`BaseChannel::clear_edit_cache`]
     fn clear_edit_cache(&mut self) {
-        // Remove all made-up "port" channels
-        self.channels_().retain(|_name, chan| chan.editable());
-
-        for chan in self.channels_().values_mut() {
+        for chan in self.chans_mut() {
             chan.clear_edit_cache()
         }
+        self.clear_compile_cache();
     }
     /// Clears the compile-cache fields for all channels.
     /// Also see [`BaseChannel::clear_compile_cache`]
-    fn clear_compile_cache(&mut self) {
-        // Remove all made-up "port" channels
-        self.channels_().retain(|_name, chan| chan.editable());
-
-        for chan in self.channels_().values_mut() {
+    fn clear_compile_cache_base(&mut self) {
+        for chan in self.chans_mut() {
             chan.clear_compile_cache()
         }
     }
 
-    fn check_end_clipped(&self, stop_tick: usize) -> bool {
-        if stop_tick < self.last_instr_end_pos() {
-            panic!("Given stop_tick {stop_tick} is below the last instruction end_pos {}",
-                   self.last_instr_end_pos())
+    fn clear_compile_cache(&mut self) {
+        self.clear_compile_cache_base()
+    }
+
+    fn is_closing_edge_clipped(&self, stop_tick: usize) -> bool {
+        if self.last_instr_end_pos().is_some_and(|last_end_pos| stop_tick < last_end_pos) {
+            panic!("Given stop_tick {stop_tick} is below the last instruction end_pos {}", self.last_instr_end_pos().unwrap())
         }
-        self.channels()
-            .values()
-            .filter(|chan| chan.editable())  // ToDo when splitting AO/DO types: remove `editable()` filter
-            .filter(|chan| !chan.instr_list().is_empty())
-            .any(|chan| {
-                let last_instr = chan.instr_list().last().unwrap();
+        self.chans()
+            .iter()
+            .filter_map(|chan| chan.instr_list().last())
+            .any(|last_instr| {
                 match last_instr.end_pos() {
-                    Some(end_pos) => end_pos == stop_tick,
-                    None => false
+                    Some(end_pos) => stop_tick == end_pos,
+                    None => false,
                 }
             })
     }
@@ -281,13 +223,19 @@ pub trait BaseDevice {
     ///
     /// # Arguments
     /// - `stop_time`: The stop time used to compile the channels.
-    fn compile(&mut self, stop_time: f64) -> f64 {
+    fn compile_base(&mut self, stop_time: f64) -> Result<(), String> {
+        if !self.got_instructions() {
+            // @Backend developers: whenever iterating over devices, you should always
+            // filter by `got_instructions()` to only interact with active devices.
+            return Err(format!("Device {} did not get any instructions", self.name()))
+        }
         let stop_tick = (stop_time * self.samp_rate()).round() as usize;
-        if stop_tick < self.last_instr_end_pos() {
-            panic!(
-                "Given stop_time {stop_time} was rounded to {stop_tick} clock cycles which is below the last instruction end_pos {}",
-                self.last_instr_end_pos()
-            )
+        if stop_tick < self.last_instr_end_pos().unwrap() {
+            return Err(format!(
+                "[Device {}] requested stop_time {stop_time} was rounded to {stop_tick} clock cycles \
+                which is below the last instruction end_pos {}",
+                self.name(), self.last_instr_end_pos().unwrap()
+            ))
         }
 
         // If on any of the channels, the last instruction has `end_spec = Some(end_pos, ...)`
@@ -303,131 +251,99 @@ pub trait BaseDevice {
         // we explicitly ask the card to run for one more clock cycle longer and generate the extra sample at the end.
         // Channel's `compile()` logic will fill this sample with the last instruction's after-end padding
         // thus reliably forming its' "closing edge".
-        let stop_pos = if self.check_end_clipped(stop_tick) {
+        let stop_pos = if self.is_closing_edge_clipped(stop_tick) {
             stop_tick + 1
         } else {
             stop_tick
         };
-        // Compile all channels
-        for chan in self.editable_channels_() {
-            chan.compile(stop_pos)
+
+        // Compile all active channels
+        for chan in self.active_chans_mut() {
+            chan.compile(stop_pos)?
         };
 
-        // For DO channels: merge line channels into port channels
-        if self.task_type() == TaskType::DO {
-            // Remove all made-up "port" channels left from the previous compile run
-            //  (although all port channels with new instructions coming would be replaced anyways during `self.channels_().insert()`,
-            //  this step cleans out any old port channels for which there are no instructions this time)
-            self.channels_().retain(|_name, chan| chan.editable());
-
-            for match_port in self.unique_port_numbers() {
-                // Collect a sorted list of possible intervals
-                let mut instr_end_set = BTreeSet::new();
-                instr_end_set.extend(
-                    self.editable_channels()
-                        .iter()
-                        .filter(|chan| chan.is_edited() && extract_port_line_numbers(chan.name()).0 == match_port)
-                        .flat_map(|chan| chan.instr_end().iter()),
-                );
-                let instr_end: Vec<usize> = instr_end_set.into_iter().collect();
-
-                let mut instr_val = vec![0.; instr_end.len()];
-                for chan in self.editable_channels().iter().filter(|chan| chan.is_edited()) {
-                    let (port, line) = extract_port_line_numbers(chan.name());
-                    if port == match_port {
-                        let mut chan_instr_idx = 0;
-                        for i in 0..instr_val.len() {
-                            assert!(chan_instr_idx < chan.instr_end().len());
-                            let chan_value =
-                                chan.instr_val()[chan_instr_idx].args.get("value").unwrap();
-                            instr_val[i] += *chan_value as f64 * 2.0f64.powf(line as f64);
-                            if instr_end[i] == chan.instr_end()[chan_instr_idx] {
-                                chan_instr_idx += 1;
-                            }
-                        }
-                    }
-                }
-                let port_instr_val: Vec<Instruction> = instr_val
-                    .iter()
-                    .map(|&val| Instruction::new_const(val))
-                    .collect();
-                let mut port_channel = Channel::new(
-                    TaskType::DO,
-                    &format!("port{}", match_port),
-                    self.samp_rate(),
-                    // The default value for merged port channel does not matter since we never explicitly compile them
-                    0.
-                );
-                *port_channel.instr_val_() = port_instr_val;
-                *port_channel.instr_end_() = instr_end;
-                self.channels_()
-                    .insert(port_channel.name().to_string(), port_channel);
-            }
-        };
-
-        // Return the total run duration to generate all the samples:
-        self.total_run_time()
+        Ok(())
     }
 
-    /// Returns a vector of compiled channels based on the given criteria.
-    ///
-    /// Filters the device's channels based on their compiled state and optional properties such as
-    /// streamability and editability.
-    ///
-    /// # Arguments
-    /// - `require_streamable`: If `true`, only compiled channels marked as streamable will be included in the result.
-    /// - `require_editable`: If `true`, only compiled channels marked as editable will be included in the result.
-    ///
-    /// # Returns
-    /// A `Vec` containing references to the channels that match the provided criteria.
-    fn compiled_channels(&self, require_streamable: bool, require_editable: bool) -> Vec<&Channel> {
-        self.channels()
-            .values()
-            .filter(|chan| {
-                chan.is_compiled()
-                    && (!require_streamable || chan.streamable())
-                    && (!require_editable || chan.editable())
-            })
-            .collect()
+    fn compile(&mut self, stop_time: f64) -> Result<(), String> {
+        self.compile_base(stop_time)
+    }
+
+    /// Base of `validate_compile_cache()`
+    fn validate_compile_cache_base(&self) -> Result<(), String> {
+        // 3 checks:
+        // - this device is active in the first place;
+        // - each active channels passes `validate_compile_cache()` test (meaning it is "fresh compiled" - compile cache matches current edit cache);
+        // - and they should all be compiled to the same stop position (since all channels of a given device share the same sample clock)
+
+        if !self.got_instructions() {
+            // @Backend developers: whenever iterating over devices, you should always
+            // filter by `got_instructions()` to only interact with active devices.
+            return Err(format!("Device {} does not have any instructions and is not active", self.name()))
+        }
+
+        let failed_chan_msgs: Vec<String> = self
+            .active_chans()
+            .iter()
+            .filter_map(|chan| chan.validate_compile_cache().err())
+            .collect();
+        if !failed_chan_msgs.is_empty() {
+            let mut full_err_msg = String::new();
+            for msg in failed_chan_msgs {
+                full_err_msg.push_str(&format!("{msg}\n"))
+            };
+            return Err(format!("[{}] The following channels failed compile cache validation:\n{full_err_msg}", self.name()))
+        }
+
+        let compiled_stop_positions: IndexMap<String, usize> = self
+            .active_chans()
+            .iter()
+            .map(|chan| (chan.name(), chan.compiled_stop_pos()))
+            .collect();
+        if !compiled_stop_positions.values().all_equal() {
+            return Err(format!("[{}] Channels have different compiled stop positions: \n{compiled_stop_positions:?}", self.name()))
+        }
+
+        Ok(())
+    }
+
+    /// Ensures that compile cache is fresh (matches current edit cache) and is self-consistent
+    fn validate_compile_cache(&self) -> Result<(), String> {
+        self.validate_compile_cache_base()
     }
 
     /// Returns the total number of samples the card will generate according to the current compile cache.
-    fn total_samps(&self) -> usize {
-        // The assumption is that all the channels of any given device
-        // must have precisely the same number of samples to generate
-        // since all the channels are assumed to be driven by the same sample clock of the device.
-        //
-        // This function first checks `total_samps` are indeed consistent across all compiled channels
-        // and then returns the common `total_samps`.
-
-        // Collect `total_samps` from all compiled channels into an `IndexMap`
-        let samps_per_chan: IndexMap<String, usize> =
-            self.channels()
-                .into_iter()
-                .filter(|(_chan_name, chan)| !chan.instr_end().is_empty())
-                .map(|(chan_name, chan)| (chan_name.to_string(), chan.total_samps()))
-                .collect();
-
-        if samps_per_chan.is_empty() {
-            return 0
-        } else {
-            // To verify consistency, compare all against the first one:
-            let &first_val = samps_per_chan.values().next().unwrap();
-            let all_equal = samps_per_chan.values().all(|&stop_pos| stop_pos == first_val);
-            if all_equal {
-                return first_val
-            } else {
-                panic!(
-                    "Channels of device {} have unequal compiled stop positions:\n\
-                    {:?}\n\
-                    When working at a device level, you are not supposed to compile individual channels directly. \
-                    Instead, call `my_device.compile(stop_pos)` and it will compile all channels with the same `stop_pos`",
-                    self.name(), samps_per_chan
-                )
-            }
+    fn compiled_stop_pos(&self) -> usize {
+        // Sanity checks:
+        if !self.got_instructions() {
+            panic!(
+                "Device {} hasn't gotten any instructions yet and is currently inactive.\n\
+                \n\
+                @Backend developers: when iterating over devices, you should always filter by `got_instructions()` and skip inactive ones",
+                self.name()
+            )
+        }
+        if let Err(msg) = self.validate_compile_cache() {
+            panic!(
+                "{msg}\n\
+                \n\
+                @Backend developers: whenever accessing compile cache, you should first call `validate_compile_cache()` \
+                to ensure that compile cache is valid - up-to-date with the edit cache and has no inconsistencies. \n\
+                \n\
+                This function is meant to be the place to gracefully handle the Err variant if it occurs \
+                (typically due to users forgetting to re-compile after adding pulses). \n\
+                \n\
+                In contrast, other functions assume the cache is valid and rely on it. Some may still \
+                do a 'validate_compile_cache()' under the hood to catch bugs but they will panic on Err."
+            )
         }
 
+        self.active_chans()
+            .last()
+            .unwrap()
+            .compiled_stop_pos()
     }
+
     /// Calculates the maximum stop time among all compiled channels.
     ///
     /// Iterates over all the compiled channels in the device, regardless of their streamability or
@@ -436,17 +352,19 @@ pub trait BaseDevice {
     ///
     /// # Returns
     /// A `f64` representing the maximum stop time (in seconds) across all compiled channels.
-    fn total_run_time(&self) -> f64 {
-        self.total_samps() as f64 * self.clock_period()
+    fn compiled_stop_time(&self) -> f64 {
+        self.compiled_stop_pos() as f64 * self.clk_period()
     }
 
-    fn last_instr_end_pos(&self) -> usize {
-        self.channels()
-            .values()
-            .filter(|chan| chan.editable())  // ToDo when splitting AO/DO types: remove `editable()` filter
-            .map(|chan| chan.last_instr_end_pos())
-            .fold(0, usize::max)
+    fn last_instr_end_pos(&self) -> Option<usize> {
+        self.chans()
+            .iter()
+            .filter_map(|chan| chan.last_instr_end_pos())
+            .reduce(
+                |largest_so_far, this| std::cmp::max(largest_so_far, this)
+            )
     }
+
     /// Calculates the maximum stop time among all editable channels and optionally adds an extra tick duration.
     ///
     /// This function determines the maximum stop time by iterating over all editable channels. 
@@ -458,70 +376,8 @@ pub trait BaseDevice {
     /// # Returns
     /// A `f64` representing the maximum stop time (in seconds) across all editable channels, 
     /// optionally increased by the duration of one tick.
-    fn last_instr_end_time(&self) -> f64 {
-        self.last_instr_end_pos() as f64 * self.clock_period()
-    }
-
-    /// Generates a signal by sampling float-point values from compiled instructions.
-    ///
-    /// This method fills a given buffer with signal values based on the compiled instructions of the device's
-    /// channels. Depending on the requirements, it can either generate signals intended for actual driver
-    /// writing or for debugging editing intentions.
-    ///
-    /// # Arguments
-    /// - `start_pos`: The starting position in the sequence of compiled instructions.
-    /// - `end_pos`: The ending position in the sequence of compiled instructions.
-    /// - `nsamps`: The number of samples to generate.
-    /// - `buffer`: A mutable reference to a 2D array. The first axis corresponds to the channel index and
-    ///    the second axis corresponds to the sample index.
-    /// - `require_streamable`: If `true`, only signals from channels marked as streamable will be generated.
-    /// - `require_editable`: If `true`, signals will be generated according to editing intentions for debugging purposes.
-    ///
-    /// # Panics
-    /// This method will panic if:
-    /// - The first dimension of the buffer does not match the number of channels that fulfill the provided requirements.
-    /// - The second dimension of the buffer does not match the provided `nsamps` value.
-    ///
-    /// # TODO Notes
-    /// The generation of signals from channels can be parallelized for performance improvements.
-    fn fill_signal_nsamps(
-        &self,
-        start_pos: usize,
-        end_pos: usize,
-        nsamps: usize,
-        buffer: &mut ndarray::Array2<f64>,
-        require_streamable: bool,
-        require_editable: bool,
-    ) {
-        // Assumes buffer of shape [num_compiled_and_streamable_channels][nsamps]
-        assert!(
-            buffer.dim().0
-                == self
-                    .compiled_channels(require_streamable, require_editable)
-                    .len(),
-            "Device {} has {} channels but passed buffer has shape {:?}",
-            self.name(),
-            self.compiled_channels(require_streamable, require_editable)
-                .len(),
-            buffer.dim()
-        );
-        assert!(
-            buffer.dim().1 == nsamps,
-            "Simulating position {}-{} with {} elements, but buffer has shape {:?}",
-            start_pos,
-            end_pos,
-            nsamps,
-            buffer.dim()
-        );
-        // This can be parallelized (note)
-        for (i, chan) in self
-            .compiled_channels(require_streamable, require_editable)
-            .iter()
-            .enumerate()
-        {
-            let mut channel_slice = buffer.slice_mut(s![i, ..]);
-            chan.fill_signal_nsamps(start_pos, end_pos, nsamps, &mut channel_slice);
-        }
+    fn last_instr_end_time(&self) -> Option<f64> {
+        self.last_instr_end_pos().map(|end_pos| end_pos as f64 * self.clk_period())
     }
 
     /// Computes and returns the signal values for specified channels in a device.
@@ -546,353 +402,50 @@ pub trait BaseDevice {
     /// This method will panic if:
     /// - There are no channels that fulfill the provided requirements.
     /// - The device's task type is not AO (Analog Output) when initializing the buffer with time data.
-    fn calc_signal_nsamps(
-        &self,
-        start_pos: usize,
-        end_pos: usize,
-        nsamps: usize,
-        require_streamable: bool,
-        require_editable: bool,
-    ) -> Array2<f64> {
-        // ToDo: look through
-        let num_chans = self
-            .compiled_channels(require_streamable, require_editable)
-            .len();
-        assert!(
-            num_chans > 0,
-            "There is no channel with streamable={}, editable={}",
-            require_streamable,
-            require_editable
-        );
-        let mut buffer = Array2::from_elem((num_chans, nsamps), 0.);
-        // Only AOChannel needs to initialize buffer with time data
-        if self.task_type() == TaskType::AO {
-            let t_values = Array1::linspace(
-                start_pos as f64 / self.samp_rate(),
-                end_pos as f64 / self.samp_rate(),
-                nsamps,
-            );
-            buffer
-                .outer_iter_mut()
-                .for_each(|mut row| row.assign(&t_values));
+    fn calc_samps(&self, samp_buf: &mut [<Self::Chan as BaseChan>::Samp], start_pos: usize, end_pos: usize) -> Result<(), String> {
+        // Sanity checks
+        //  Do not launch panics in this function since it is used during streaming runtime. Return `Result::Err` instead.
+        /*      During streaming, there is an active connection to the hardware driver.
+                In case of panic, context is being dropped in unspecified order.
+                The connection drop logic may be invoked only after some parts of memory have already been deallocated
+                and thus fail to free-up hardware properly leading to unpredictable consequences like OS freezes.
+        */
+        if !self.got_instructions() {
+            return Err(format!("calc_samps(): device {} did not get any instructions", self.name()))
         }
-        self.fill_signal_nsamps(
-            start_pos,
-            end_pos,
-            nsamps,
-            &mut buffer,
-            require_streamable,
-            require_editable,
-        );
-        buffer
-    }
+        self.validate_compile_cache()?;
 
-    /// Retrieves a list of unique port numbers from the device's channels.
-    ///
-    /// This utility function is primarily used with DO (Digital Output) devices to identify and operate
-    /// on unique ports. It scans through the compiled channels of the device, filtering for those that are
-    /// editable, and extracts the unique port numbers associated with them.
-    ///
-    /// # Returns
-    /// A vector of unique port numbers identified in the device's channels.
-    ///
-    /// # Panics
-    /// The method will panic if it's invoked on a device that is not of task type DO.
-    fn unique_port_numbers(&self) -> Vec<usize> {
-        assert!(
-            self.task_type() == TaskType::DO,
-            "unique ports should only be invoked for DOs, but {} is not",
-            self.name()
-        );
-
-        let mut port_numbers = BTreeSet::new();
-
-        self.compiled_channels(false, true).iter().for_each(|chan| {
-            // Capture the port
-            let name = &chan.name();
-            port_numbers.insert(extract_port_line_numbers(name).0);
-        });
-        port_numbers.into_iter().collect()
-    }
-}
-
-/// Represents a National Instruments (NI) device.
-///
-/// A `Device` is the primary structure used to interact with NI hardware. It groups multiple
-/// channels, each of which corresponds to a physical channel on an NI device. This struct provides
-/// easy access to various properties of the device, such as its physical name, task type, and
-/// several clock and trigger configurations.
-/// For editing and compiling behavior of devices, see the [`BaseDevice`] trait.
-///
-/// # Fields
-/// - `channels`: A collection of channels associated with this device.
-/// - `name`: Name of the device as seen by the NI driver.
-/// - `task_type`: Specifies the task type associated with the device.
-/// - `samp_rate`: The sampling rate of the device in Hz.
-/// - `samp_clk_src`: Optional source of the sampling clock; supply `None` for on-board clock source.
-/// - `trig_line`: Optional identifier for the port through which to import/export the task start trigger.
-///     Supply `None` for trivial triggering behavior.
-/// - `export_trig`: Optional Boolean indicating if the device exports its start trigger. If `true`, the device
-///     exports the start trigger of the NI-task associated with this device through `trig_line`. If `false` or `None`,
-///     the device is set to import the start trigger. In case that any device in an experiment has nontrivial triggering behavior,
-///     one and only one of the devices must have `export_trig` set to `true`.
-/// - `ref_clk_line`: Optional source of the reference clock to phase-lock the device clock to.
-/// - `export_ref_clk`: Optional indicator of whether to export the reference clock. If `true`, the device exports its
-///     reference clock. If `false` or `None`, it imports the reference clock. Use `None` for trivial behavior.
-/// - `ref_clk_rate`: Optional rate of the reference clock in Hz.
-///
-/// # Synchronization Methods
-///
-/// For experiments that do not require synchronization between devices, set all optional fields of `Device` to `None`.
-/// However, for more accurate and cohesive experiments, we recommend at least implementing start-trigger synchronization.
-///
-/// ## Start-trigger Synchronization
-///
-/// Relevant fields: `trig_line`, `export_trig`.
-///
-/// Refer to the official [NI documentation on start-trigger synchronization](https://www.ni.com/docs/en-US/bundle/ni-daqmx/page/mxcncpts/syncstarttrigger.html).
-///
-/// This method designates one device to export its start trigger and others to import. When the experiment begins, tasks on
-/// devices with `export_trig` set to `false` are set to wait for a digital edge trigger from the `trig_line` channel. The device with `export_trig` set to `true` exports its start trigger to `trig_line`.
-///
-/// **Note**: It's essential to physically connect the device that exports its trigger (where `export_trig` is `true`) to the corresponding lines on devices that import the trigger.
-///
-/// For PCIe devices, use a `PFI` label. For PXIe devices, use the label `PXI_Trig` followed by a number in the range 0-7.
-/// This backend crate ensures task synchronization such that threads handling tasks set to import the trigger always start listening for triggers before the exporting task begins.
-///
-/// For PXIe devices linked to a chassis, ensure that you configure trigger bus routing using NI-MAX (on Windows) or the
-/// NI Hardware Configuration Utilities (on Linux) when specifying backplane trigger lines. Detailed information can be
-/// found [here](https://www.ni.com/docs/en-US/bundle/pxi-platform-services-help/page/trigger_routing_and_reservation.html).
-///
-/// It's important to note that after starting, each device's task utilizes its internal clock, which may result in incremental
-/// drifts between devices over time. For longer signals, it's advisable to use additional synchronization methods to ensure
-/// clock alignment.
-///
-/// ### Example:
-/// Here, the device `PXI1Slot6` exports its start trigger to `PXI1_Trig0`, while `PXI1Slot7` imports its start
-/// trigger from the same line.
-/// ```
-/// # use nicompiler_backend::*;
-/// let mut exp = Experiment::new();
-/// exp.add_do_device("PXI1Slot6", 1e6);
-/// exp.add_do_device("PXI1Slot7", 1e6);
-/// exp.device_cfg_trig("PXI1Slot6", "PXI1_Trig0", true);
-/// exp.device_cfg_trig("PXI1Slot7", "PXI1_Trig0", false);
-/// ```
-///
-/// The compiler will panic if more than one device exports trigger
-/// ```should_panic
-/// # use nicompiler_backend::*;
-/// let mut exp = Experiment::new();
-/// exp.add_do_device("PXI1Slot6", 1e6);
-/// exp.add_do_device("PXI1Slot7", 1e6);
-/// exp.device_cfg_trig("PXI1Slot6", "PXI1_Trig0", true);
-/// exp.device_cfg_trig("PXI1Slot7", "PXI1_Trig0", true);
-/// ```
-///
-/// The compiler **will** panic if some device is expecting a start trigger yet no device exports one.
-/// ```should_panic
-/// # use nicompiler_backend::*;
-/// let mut exp = Experiment::new();
-/// exp.add_do_device("PXI1Slot6", 1e6);
-/// exp.add_do_channel("PXI1Slot6", 0, 4, 0.);
-/// exp.device_cfg_trig("PXI1Slot6", "PXI1_Trig0", false);
-/// exp.go_high("PXI1Slot6", "port0/line4", 0.5);
-/// exp.compile_with_stoptime(1.); // Panics here
-/// ```
-///
-/// ## Phase-lock to Reference Clock
-///
-/// Relevant fields: `ref_clk_line`, `ref_clk_rate`, `export_ref_clk`.
-///
-/// Refer to the [NI documentation on phase-lock synchronization](https://www.ni.com/docs/en-US/bundle/ni-daqmx/page/mxcncpts/syncrefclock.html).
-///
-/// A subset of NI devices support this flexible synchronization method, which allows devices synchronized in this manner
-/// to operate at different sampling rates. Devices phase-lock their on-board oscillators to an external reference at `ref_clk_line`
-/// and indicate its frequency via `ref_clk_rate`. A device can optionally export its 10MHz onboard reference clock to `ref_clk_line` by setting `export_ref_clk` to `true`.
-///
-/// **Note**: Devices phase-locked in this manner still require start-trigger synchronization to ensure synchronized start times.
-///
-/// ### Example:
-/// The device `PXI1Slot6` exports its start trigger signal to `PXI1_Trig0` and its 10MHz reference clock to `PXI1_Trig7`.
-/// The device `PXI1Slot4` acts accordingly.
-/// ```rust
-/// use nicompiler_backend::*;
-/// let mut exp = Experiment::new();
-/// exp.add_ao_device("PXI1Slot3", 1e6);
-/// exp.device_cfg_trig("PXI1Slot3", "PXI1_Trig0", true);
-/// exp.device_cfg_ref_clk("PXI1Slot3", "PXI1_Trig7", 1e7, true);
-///
-/// exp.add_ao_device("PXI1Slot4", 1e6);
-/// exp.device_cfg_trig("PXI1Slot4", "PXI1_Trig0", false);
-/// exp.device_cfg_ref_clk("PXI1Slot4", "PXI1_Trig7", 1e7, false);
-/// ```
-///
-/// ## Importing Sample Clock
-///
-/// Relevant fields: `samp_clk_src`.
-///
-/// Check out the [NI documentation on sample clock synchronization](https://www.ni.com/docs/en-US/bundle/ni-daqmx/page/mxcncpts/syncsampleclock.html).
-///
-/// Some NI devices do not support reference clock synchronization. As an alternative, they can directly use external
-/// clock signals for their sampling clock. However, this constrains them to operate at the same rate as the imported sample clock.
-///
-/// ### Example:
-/// Building on the previous example, an additional `PXI1Slot6` sources its sample clock from the 10MHz signal exported by `PXI1Slot3`.
-/// ```rust
-/// use nicompiler_backend::*;
-/// let mut exp = Experiment::new();
-/// exp.add_ao_device("PXI1Slot3", 1e6);
-/// exp.device_cfg_trig("PXI1Slot3", "PXI1_Trig0", true);
-/// exp.device_cfg_ref_clk("PXI1Slot3", "PXI1_Trig7", 1e7, true);
-///
-/// exp.add_ao_device("PXI1Slot4", 1e6);
-/// exp.device_cfg_trig("PXI1Slot4", "PXI1_Trig0", false);
-/// exp.device_cfg_ref_clk("PXI1Slot4", "PXI1_Trig7", 1e7, false);
-///
-/// exp.add_do_device("PXI1Slot6", 1e7);
-/// exp.device_cfg_samp_clk_src("PXI1Slot6", "PXI1_Trig7");
-/// exp.device_cfg_trig("PXI1Slot6", "PXI1_Trig0", false);
-/// ```
-pub struct Device {
-    channels: IndexMap<String, Channel>,
-
-    name: String,
-    task_type: TaskType,
-    samp_rate: f64,
-
-    // ToDo: move this to NIStreamer crate
-    start_trig_in: Option<String>,
-    start_trig_out: Option<String>,
-    samp_clk_in: Option<String>,
-    samp_clk_out: Option<String>,
-    ref_clk_in: Option<String>,
-    min_bufwrite_timeout: Option<f64>,  // Some(min_timeout_seconds) or None - wait infinitely
-}
-
-impl Device {
-    /// Constructs a new `Device` instance.
-    ///
-    /// This constructor initializes a device with the provided parameters. The `channels` field
-    /// is initialized as an empty collection. All synchronization fields are initialized to `None`
-    /// by default. For nontrivial synchronization behavior, use the methods [`BaseDevice::cfg_samp_clk_src`],
-    /// [`BaseDevice::cfg_trig`], and [`BaseDevice::cfg_ref_clk`].
-    ///
-    /// # Arguments
-    /// - `name`: Name of the device as seen by the NI driver.
-    /// - `task_type`: The type of task associated with the device.
-    /// - `samp_rate`: Desired sampling rate in Hz.
-    ///
-    /// # Returns
-    /// A new instance of `Device` with the specified configurations and all synchronization-related fields set to `None`.
-    pub fn new(name: &str, task_type: TaskType, samp_rate: f64) -> Self {
-        Self {
-            channels: IndexMap::new(),
-
-            name: name.to_string(),
-            task_type,
-            samp_rate,
-
-            // ToDo: move this to NIStreamer crate:
-            start_trig_in: None,
-            start_trig_out: None,
-            samp_clk_in: None,
-            samp_clk_out: None,
-            ref_clk_in: None,
-            min_bufwrite_timeout: Some(5.0),
+        if !(end_pos >= start_pos + 1) {
+            return Err(format!("calc_samps(): requested start_pos={start_pos} and end_pos={end_pos} are invalid - end_pos must be no less than start_pos + 1"))
         }
-    }
 
-    pub fn get_samp_rate(&self) -> f64 {
-        self.samp_rate
-    }
+        if !(end_pos <= self.compiled_stop_pos()) {
+            return Err(format!("calc_samps(): requested end_pos={end_pos} exceeds the compiled stop position {}", self.compiled_stop_pos()))
+        }
 
-    pub fn get_start_trig_in(&self) -> Option<String> {
-        self.start_trig_in.clone()
-    }
-    pub fn set_start_trig_in(&mut self, term: Option<String>) {
-        self.start_trig_in = term;
-    }
+        let n_chans = self.active_chans().len();
+        let n_samps = end_pos - start_pos;
+        if n_chans * n_samps > samp_buf.len() {
+            return Err(format!(
+                "calc_samps(): provided samp_buf has insufficient size:\n\
+                \t n_chans*n_samps={} exceeds samp_buf.len()={}",
+                n_chans * n_samps, samp_buf.len()
+            ))
+        }
 
-    pub fn get_start_trig_out(&self) -> Option<String> {
-        self.start_trig_out.clone()
-    }
-    pub fn set_start_trig_out(&mut self, term: Option<String>) {
-        self.start_trig_out = term;
-    }
+        let start_t = start_pos as f64 * self.clk_period();
+        let end_t = (end_pos - 1) as f64 * self.clk_period();
+        let t_arr = Array1::linspace(start_t, end_t, n_samps);
+        let t_arr_slice = t_arr.as_slice().expect("[BaseDev::calc_samps()] BUG: t_arr.as_slice() returned None");
 
-    pub fn get_samp_clk_in(&self) -> Option<String> {
-        self.samp_clk_in.clone()
-    }
-    pub fn set_samp_clk_in(&mut self, term: Option<String>) {
-        self.samp_clk_in = term;
-    }
-
-    pub fn get_samp_clk_out(&self) -> Option<String> {
-        self.samp_clk_out.clone()
-    }
-    pub fn set_samp_clk_out(&mut self, term: Option<String>) {
-        self.samp_clk_out = term;
-    }
-
-    pub fn get_ref_clk_in(&self) -> Option<String> {
-        self.ref_clk_in.clone()
-    }
-    pub fn set_ref_clk_in(&mut self, term: Option<String>) {
-        self.ref_clk_in = term;
-    }
-
-    pub fn get_min_bufwrite_timeout(&self) -> Option<f64> {
-        self.min_bufwrite_timeout.clone()
-    }
-    pub fn set_min_bufwrite_timeout(&mut self, min_timeout: Option<f64>) {
-        self.min_bufwrite_timeout = min_timeout;
-    }
-}
-
-impl BaseDevice for Device {
-    // ToDo: this is a temporary dirty fix. Remove after crate merge
-    //  BaseDevice does not need to include anything about hardware settings
-    fn get_start_trig_in(&self) -> Option<String> {
-        self.get_start_trig_in()
-    }
-    fn get_start_trig_out(&self) -> Option<String> {
-        self.get_start_trig_out()
-    }
-    fn get_samp_clk_in(&self) -> Option<String> {
-        self.get_samp_clk_in()
-    }
-    fn get_samp_clk_out(&self) -> Option<String> {
-        self.get_samp_clk_out()
-    }
-    fn get_ref_clk_in(&self) -> Option<String> {
-        self.get_ref_clk_in()
-    }
-    fn get_min_bufwrite_timeout(&self) -> Option<f64> {
-        self.get_min_bufwrite_timeout()
-    }
-    // ToDo: this is a temporary dirty fix. Remove after crate merge
-
-    // Immutable accessors (getters)
-    fn channels(&self) -> &IndexMap<String, Channel> {
-        &self.channels
-    }
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn task_type(&self) -> TaskType {
-        self.task_type
-    }
-
-    fn samp_rate(&self) -> f64 {
-        self.samp_rate
-    }
-
-    // Mutable accessors
-    fn channels_(&mut self) -> &mut IndexMap<String, Channel> {
-        &mut self.channels
+        for (chan_row_idx, chan) in self.active_chans().iter().enumerate() {
+            chan.fill_samps(
+                start_pos,
+                &mut samp_buf[chan_row_idx * n_samps .. (chan_row_idx + 1) * n_samps],
+                &t_arr_slice
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -900,6 +453,48 @@ impl BaseDevice for Device {
 mod test {
     use crate::device::*;
     use crate::instruction::*;
+
+    /*
+    pub struct Device {
+        chans: IndexMap<String, Channel>,
+        name: String,
+        samp_rate: f64,
+    }
+
+    impl Device {
+        /// Constructs a new `Device` instance.
+        ///
+        /// This constructor initializes a device with the provided parameters. The `channels` field
+        /// is initialized as an empty collection. All synchronization fields are initialized to `None`
+        /// by default. For nontrivial synchronization behavior, use the methods [`BaseDevice::cfg_samp_clk_src`],
+        /// [`BaseDevice::cfg_trig`], and [`BaseDevice::cfg_ref_clk`].
+        ///
+        /// # Arguments
+        /// - `name`: Name of the device as seen by the NI driver.
+        /// - `task_type`: The type of task associated with the device.
+        /// - `samp_rate`: Desired sampling rate in Hz.
+        ///
+        /// # Returns
+        /// A new instance of `Device` with the specified configurations and all synchronization-related fields set to `None`.
+        pub fn new(name: &str, task_type: TaskType, samp_rate: f64) -> Self {
+            Self {
+                channels: IndexMap::new(),
+
+                name: name.to_string(),
+                task_type,
+                samp_rate,
+
+                // ToDo: move this to NIStreamer crate:
+                start_trig_in: None,
+                start_trig_out: None,
+                samp_clk_in: None,
+                samp_clk_out: None,
+                ref_clk_in: None,
+                min_bufwrite_timeout: Some(5.0),
+            }
+        }
+    }
+    */
 
     #[test]
     fn last_instr_end_pos() {

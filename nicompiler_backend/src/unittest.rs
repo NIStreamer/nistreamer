@@ -1,8 +1,7 @@
 mod instruction;
 mod channel;
 mod device;
-mod experiment;
-mod utils;
+mod streamer;
 
 fn main() {
     println!("Hello!");
