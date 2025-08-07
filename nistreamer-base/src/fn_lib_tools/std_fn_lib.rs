@@ -3,7 +3,7 @@
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 use std::f64::consts::PI;
-use fn_lib_macros::{std_fn_f64, std_fn_bool};
+use nistreamer_fn_lib_macros::{std_fn_f64, std_fn_bool};
 use crate::fn_lib_tools::{Calc, FnBoxF64, FnBoxBool};
 
 #[pyclass]

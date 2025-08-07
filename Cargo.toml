@@ -1,22 +1,20 @@
 [package]
-name = "_nistreamer"
-version = "0.1.0"
+name = "nistreamer"
 edition = "2021"
-description = "Rust back-end of nistreamer package."
-license = "MIT"
+description = "Rust back-end of NIStreamer package"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
-name = "_nistreamer"
-crate-type = ["cdylib", "lib"]
+name = "nistreamer"
+crate-type = ["cdylib"]
 
 [[bin]]
 name = "main"
 path = "src/main.rs"
 
 [dependencies]
-base_streamer = { path = "../base-streamer" }
-usr_fn_lib = { path = "../usr-fn-lib", optional = true }
+nistreamer-base = { path = "./nistreamer-base" }
+usr-fn-lib = { path = "../usr-fn-lib", optional = true }
 indexmap = "2.3.0"
 pyo3 = { version = "0.22.1", features = ["multiple-pymethods", "abi3-py37"] }
 libc = "0.2.147"
@@ -29,5 +27,5 @@ serde_json = { version = "1.0.135", optional = true}
 #   single feature example: --features usr_fn_lib
 #        multiple features: --features "usr_fn_lib, nidaqmx_dummy"
 [features]
-usr_fn_lib = ["dep:usr_fn_lib"]
+usr_fn_lib = ["dep:usr-fn-lib"]
 nidaqmx_dummy = ["dep:serde", "dep:serde_json", "indexmap/serde"]

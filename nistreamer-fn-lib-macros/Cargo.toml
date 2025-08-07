@@ -1,7 +1,7 @@
 [package]
-name = "fn_lib_macros"
-version = "0.1.0"
+name = "nistreamer-fn-lib-macros"
 edition = "2021"
+description = "Helper procedural macros for waveform function libraries"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]

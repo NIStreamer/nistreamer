@@ -146,8 +146,8 @@ extern crate pyo3;
 use pyo3::prelude::*;
 use pyo3::exceptions::{PyValueError};
 
-extern crate base_streamer;
-use base_streamer::fn_lib_tools::StdFnLib;
+extern crate nistreamer_base;
+use nistreamer_base::fn_lib_tools::StdFnLib;
 #[cfg(feature = "usr_fn_lib")]
 use usr_fn_lib::UsrFnLib;
 

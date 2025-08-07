@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
-use base_streamer::fn_lib_tools::FnTraitSet;
-use base_streamer::instruction::Instr;
-use base_streamer::channel::BaseChan;
+use nistreamer_base::fn_lib_tools::FnTraitSet;
+use nistreamer_base::instruction::Instr;
+use nistreamer_base::channel::BaseChan;
 
 // region AO Channel
 pub struct AOChan {

@@ -1,5 +1,5 @@
 extern crate indexmap;
-extern crate base_streamer;
+extern crate nistreamer_base;
 extern crate itertools;
 
 // mod channel;

@@ -6,10 +6,10 @@ use pyo3::prelude::*;
 use pyo3::PyResult;
 use pyo3::exceptions::{PyValueError, PyKeyError, PyRuntimeError};
 
-use base_streamer::channel::BaseChan;
-use base_streamer::device::BaseDev;
-use base_streamer::streamer::BaseStreamer;
-use base_streamer::fn_lib_tools::{FnBoxF64, FnBoxBool};
+use nistreamer_base::channel::BaseChan;
+use nistreamer_base::device::BaseDev;
+use nistreamer_base::streamer::BaseStreamer;
+use nistreamer_base::fn_lib_tools::{FnBoxF64, FnBoxBool};
 
 use crate::channel::{AOChan, DOChan};
 use crate::device::{AODev, DODev, NIDev, CommonHwCfg};
