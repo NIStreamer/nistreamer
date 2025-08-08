@@ -13,7 +13,7 @@ project = 'NI Pulse Streamer'
 copyright = '2025, Project contributors'
 author = 'Project contributors'
 release = '0.1.0'
-github_url = 'https://github.com/pulse-streamer'
+github_url = 'https://github.com/NIStreamer/nistreamer'
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
@@ -25,7 +25,7 @@ extensions = [
     'sphinx.ext.viewcode',
     'sphinx_autodoc_typehints',
 ]
-autodoc_mock_imports = ['nistreamer_backend', 'numpy']
+autodoc_mock_imports = ['_nistreamer', 'numpy', 'plotly']
 autodoc_member_order = "bysource"
 autosummary_generate = True
 napoleon_google_docstring = True
@@ -44,7 +44,7 @@ html_theme_options = {
     "logo": {
         "text": "NI Pulse Streamer",
     },
-    "github_url": "https://github.com/pulse-streamer",
+    "github_url": "https://github.com/NIStreamer/nistreamer",
     "use_edit_page_button": False,
     "show_toc_level": 2,
 }

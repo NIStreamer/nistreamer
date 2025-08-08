@@ -47,7 +47,7 @@ All set! You should now be able to import and use the streamer:
 from nistreamer import NIStreamer, std_fn_lib 
 from nistreamer import usr_fn_lib  # only if this feature was enabled, see below
 ```  
-See the [demos](https://github.com/pulse-streamer/ni-streamer/tree/main/py_api/demo) for a quick-start guide.
+See the [demos](https://github.com/NIStreamer/nistreamer/tree/main/py_api/demo) for a quick-start guide.
 
 
 ## Advanced build options

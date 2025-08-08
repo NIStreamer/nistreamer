@@ -17,12 +17,13 @@ classifiers = [
     "Programming Language :: Rust",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering",
+    "Topic :: System :: Hardware :: Hardware Drivers"
 ]
 
 [project.urls]
 Documentation = "https://nistreamer.readthedocs.io"
-GitHub = "https://github.com/pulse-streamer"
-Issues = "https://github.com/pulse-streamer/ni-streamer/issues"
+GitHub = "https://github.com/NIStreamer/nistreamer"
+Issues = "https://github.com/NIStreamer/nistreamer/issues"
 
 [tool.maturin]
 python-source = "py_api"  # Location of `nistreamer` Python front-end
