@@ -1,77 +1,115 @@
-# Installation instructions
-Currently, you have to git-clone the repos and build the back-end locally. The step-by-step guide is provided below. A pre-built and `pip`-installable version is coming later. 
+# Installation
+Before starting, ensure you have the official [NI-DAQmx driver](https://www.ni.com/en/support/downloads/drivers/download.ni-daq-mx.html) installed – `nistreamer` is only a layer on top of the driver and will not work without it.
 
-Ensure you have the official [NI-DAQmx driver](https://www.ni.com/en/support/downloads/drivers/download.ni-daq-mx.html) installed before starting – `nistreamer` is only a layer on top of the driver and will not work without it.
+## Installing with `pip`
+The easiest way to get `nistreamer` is by using `pip`. Activate the desired Python environment (e.g. `conda activate ...`) and run the following command:
+```
+pip install nistreamer
+```
+This will download and install a fully pre-compiled package into your Python environment. You should be able to import and use `nistreamer` immediately: 
+```Python
+from nistreamer import NIStreamer, std_fn_lib
+```
+Check out [demos](https://github.com/NIStreamer/nistreamer/tree/main/py_api/demo) to get started. 
 
+:::{note}
+A pre-compiled version is only available for Windows, x86-64/AMD64 architecture, Python 3.7 and higher. You need to build from source to run on other platforms (see instructions below).
+:::
 
-## Get the tools
+## Building from source
+You need to compile the project directly from source in the following cases:
+* When adding custom waveform functions through `usr_fn_lib` option;
+* Your platform is not supported by the pre-compiled distribution[^1].
+
+The step-by-step guide is provided below.
+
+[^1]: The project was only tested on Windows. In principle, it should also work on Linux - NI provides DAQmx drivers for Linux and `nistreamer` source code should be compatible as well. You will need to add `NIDAQmx.lib` location in `.cargo/config.toml` (see [this note](#cannot-open-input-file-nidaqmx-lib)). 
+
+### 1. Get the tools
 Install Rust by following the [official instructions](https://www.rust-lang.org/learn/get-started). This process will install all necessary Rust components including `cargo` – the command-line tool we will be using to compile the backend. You can verify that `cargo` was installed by running `cargo --version`.
 
 We also need [maturin](https://www.maturin.rs/) to install compiled backend as a Python package. `maturin` itself is shipped as a Python package, so activate the desired environment (e.g. `conda activate ...`) where you want `nistreamer` to be eventually installed and run `pip install maturin`.
 
-Finally, we recommend installing `git` – the command-line version control tool. This is the best way to get `nistreamer` source code you need and also pull the updates in the future. Download and run the [official installer](https://git-scm.com/downloads).
+Finally, we recommend installing `git` – the command-line version control tool. This is the best way to get `nistreamer` source code you need and also pull the updates in the future. Download and run the [official installer](https://git-scm.com/downloads). Alternatively, you can manually download source code as `.zip` archive from GitHub.
 
+### 2. Get the source code
+The full source code is hosted on [GitHub](https://github.com/NIStreamer/nistreamer). Download the repository with `git`:
+```
+git clone https://github.com/NIStreamer/nistreamer.git
+```
+(or you can manually download and unpack `.zip` archive from GitHub if `git` is not installed).
 
-## Basic installation
+To build with a library of custom waveforms, you should also get a clone of `usr-fn-lib` ([GitHub](https://github.com/NIStreamer/usr-fn-lib)) which you will be populating with new functions. We recommend creating your own GitHub fork of this repo - this way you can both version-control your own library and also pull in any future interface updates. 
 
-Once you have all the tools installed, you can build `nistreamer`:
+Once forked, clone your `usr-fn-lib` next to `nistreamer` - your directory tree should look like this:
+```
+parent_directory/
+├── nistreamer/
+│   ├── Cargo.toml
+│   ├── pyproject.toml
+│   └── ...
+└── usr-fn-lib/
+    ├── Cargo.toml
+    └── ...
+```
 
-1. Get the full source code. It is hosted on [GitHub](https://github.com/pulse-streamer) and is split into two different repositories - `base-streamer` and `ni-streamer`. The best way is to clone them with `git`:
-   ```
-   git clone https://github.com/pulse-streamer/base-streamer.git
-   git clone https://github.com/pulse-streamer/ni-streamer.git
-   ```
+### 3. Compile and install
+Open a terminal and navigate into `nistreamer` directory (this location should contain both `pyproject.toml` and `Cargo.toml` files). Don't forger to activate the desired Python environment (e.g. `conda activate ...`).
 
-2. Now compile the backend. In terminal, navigate to `/ni-streamer/backend` directory (this location should have `Cargo.toml` file) and run:
-   ```
-   cargo build --release
-   ```
-   If there are any compile errors, try checking [troubleshooting guide](#troubleshooting). Next run:
-   ```
-   maturin develop --release
-   ```  
-   to install the compiled backend as `nistreamer_backend` package into your Python environment. Don't forget to activate your desired target environment (e.g. `conda activate ...`) before running this command.
+For a default installation with the built-in waveform library run:
+```
+maturin develop
+```
+while building with the `usr-fn-lib` option requires adding the features flag[^2]:
+```
+maturin develop --features usr_fn_lib
+```
+[^2]: If building on Linux, add the `pyo3/extension-module` feature like this: `maturin develop --features "usr_fn_lib, pyo3/extension-module"`
 
-
-3. Now the front-end. It is a pure Python package and does not need to be installed. You only need to add its' location to Python's search path. The safest way is to do it locally in each of your scripts:
-   ```Python
-   import sys
-   import os
-   sys.path.append(os.path.join(r'/absolute/path/ni-streamer/py_api'))
-   ```  
-   Alternatively, you can append the path directly to the system-wide `PYTHONPATH` variable.  
-
-
-All set! You should now be able to import and use the streamer:  
+This command will both compile the back-end and install the full package into your active Python environment. 
+If this operation completed without errors, you should be able to import and use `nistreamer` immediately:
 ```Python
 from nistreamer import NIStreamer, std_fn_lib 
-from nistreamer import usr_fn_lib  # only if this feature was enabled, see below
+from nistreamer import usr_fn_lib  # only if this feature was enabled
 ```  
-See the [demos](https://github.com/NIStreamer/nistreamer/tree/main/py_api/demo) for a quick-start guide.
+Next, you can check out [demos](https://github.com/NIStreamer/nistreamer/tree/main/py_api/demo) for a quick-start guide. 
 
+If build failed, refer to [troubleshooting guide](#troubleshooting).
 
-## Advanced build options
-Backend can be compiled with optional build features:
+### Troubleshooting
+If build fails, read the error message - it contains a lot of useful information and sometimes suggests a fix to the issue.
+
+#### Building with `usr-fn-lib`
+If building with `--features usr_fn_lib` fails, try compiling without it as a sanity check. If default build works, there is likely a mistake in your Rust code.
+
+Look through the full print-out. It will look something like this:
 ```
-cargo build --release --features feature_name
-maturin develop --release --features feature_name
+   Compiling pyo3-build-config v0.22.6
+   Compiling pyo3-macros-backend v0.22.6
+   ...
+   ... many lines skipped ... 
+   ...
+   Compiling nistreamer-base v0.0.0 (C:\Users\...\nistreamer\nistreamer-base)
+   Compiling usr-fn-lib v0.1.0 (C:\Users\...\usr-fn-lib)   <-- THIS STEP FAILED
+   
+error[E0277]: cannot add `{integer}` to `f64`   <-- ERROR TYPE, COPY FOR WEB SEARCHING
+
+  --> C:\Users\...\usr-fn-lib\src\lib.rs:19:40   <-- PRICESE LOCATION
+  
+... 
+help: consider using a floating-point literal by writing it with `.0`  <-- SUGGESTED FIX
+...
 ```
-The following features are available:
+In this example, it is indeed `usr-fn-lib` which failed to compile due to a mistake in custom Rust code. In such cases, see if the compiler suggested any fixes. A web search with the error type can also give solutions for the most common Rust pitfalls. 
 
-| Name            | Desctiption                                                                                                                       |
-|-----------------|-----------------------------------------------------------------------------------------------------------------------------------|
-| `usr_fn_lib`    | Include user function library. `usr-fn-lib` crate should be placed in the same directory with `base-streamer` and `ni-streamer`   |
-| `nidaqmx_dummy` | Compile with a "dummy" instead of the actual NI-DAQmx driver. Helpful for development on a computer without the driver installed. |
+#### Cargo is not recognized
+If you installed Rust and still get the following error:
+```
+cargo is not recognized as an internal or external command
+```
+ensure that Rust binaries are added to your system's PATH. The installer typically does this, but in case it didn't, add `C:\Users\<YOUR_USERNAME>\.cargo\bin` to your system's PATH.
 
-Multiple features can be combined: `--features "usr_fn_lib, nidaqmx_dummy"`
-
-
-## Troubleshooting
-
-### cargo is not recognized as an internal or external command
-If you installed Rust and still get the error indicating that `cargo` is not recognized, ensure that Rust binaries are added to your system's PATH. The installer typically does this, but in case it didn't, add `C:\Users\<YOUR_USERNAME>\.cargo\bin` to your system's PATH.
-
-### Cannot open input file `NIDAQmx.lib`
+#### Cannot open input file `NIDAQmx.lib`
 Error message ending with the following line:
 ```
 note: LINK : fatal error LNK1181: cannot open input file 'NIDAQmx.lib'
@@ -80,5 +118,19 @@ means that Cargo did not find the NIDAQmx static library which has to be present
 ```
 C:/Program Files (x86)/National Instruments/Shared/ExternalCompilerSupport/C/lib64/msvc/NIDAQmx.lib
 ```
-If on your system it is located somewhere else, update the linker arguments in `ni-streamer/backend/.cargo/config.toml` with the correct full path.
+If on your system it is located somewhere else, update the linker arguments in `nistreamer/.cargo/config.toml` with the correct full path.
 
+
+### Advanced build options
+Back-end can be compiled with optional build features[^2]:
+```
+maturin develop --features feature_name
+```
+The following features are available:
+
+| Name            | Desctiption                                                                                                                       |
+|-----------------|-----------------------------------------------------------------------------------------------------------------------------------|
+| `usr_fn_lib`    | Include user function library. `usr-fn-lib` crate should be placed in the same directory with `nistreamer`.                       |
+| `nidaqmx_dummy` | Compile with a "dummy" instead of the actual NI-DAQmx driver. Helpful for development on a computer without the driver installed. |
+
+Multiple features can be combined: `--features "usr_fn_lib, nidaqmx_dummy"`
