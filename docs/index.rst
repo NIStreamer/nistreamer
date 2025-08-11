@@ -39,3 +39,4 @@ See the `demo notebooks <https://github.com/NIStreamer/nistreamer/tree/main/py_a
 
     getting_started/index
     api/index
+    internals/index
