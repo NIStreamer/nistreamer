@@ -27,5 +27,5 @@ serde_json = { version = "1.0.135", optional = true}
 #   single feature example: --features usr_fn_lib
 #        multiple features: --features "usr_fn_lib, nidaqmx_dummy"
 [features]
-usr_fn_lib = ["dep:nistreamer-usrlib"]
+usrlib = ["dep:nistreamer-usrlib"]
 nidaqmx_dummy = ["dep:serde", "dep:serde_json", "indexmap/serde"]

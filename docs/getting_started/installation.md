@@ -18,7 +18,7 @@ A pre-compiled version is only available for Windows, x86-64/AMD64 architecture,
 
 ## Building from source
 You need to compile the project directly from source in the following cases:
-* When adding custom waveform functions through `usr_fn_lib` option;
+* When adding custom waveform functions through `usrlib` option;
 * Your platform is not supported by the pre-compiled distribution[^1].
 
 The step-by-step guide is provided below.
@@ -39,16 +39,16 @@ git clone https://github.com/NIStreamer/nistreamer.git
 ```
 (or you can manually download and unpack `.zip` archive from GitHub if `git` is not installed).
 
-To build with a library of custom waveforms, you should also get a clone of `usr-fn-lib` ([GitHub](https://github.com/NIStreamer/usr-fn-lib)) which you will be populating with new functions. We recommend creating your own GitHub fork of this repo - this way you can both version-control your own library and also pull in any future interface updates. 
+To build with a library of custom waveforms, you should also get a clone of `nistreamer-usrlib` ([GitHub](https://github.com/NIStreamer/nistreamer-usrlib)) which you will be populating with new functions. We recommend creating your own GitHub fork of this repo - this way you can both version-control your own library and also pull in any future interface updates. 
 
-Once forked, clone your `usr-fn-lib` next to `nistreamer` - your directory tree should look like this:
+Once forked, clone your `nistreamer-usrlib` next to `nistreamer` - your directory tree should look like this:
 ```
 parent_directory/
 ├── nistreamer/
 │   ├── Cargo.toml
 │   ├── pyproject.toml
 │   └── ...
-└── usr-fn-lib/
+└── nistreamer-usrlib/
     ├── Cargo.toml
     └── ...
 ```
@@ -60,11 +60,11 @@ For a default installation with the built-in waveform library run:
 ```
 maturin develop
 ```
-while building with the `usr-fn-lib` option requires adding the features flag[^2]:
+while building with the `usrlib` option requires adding the features flag[^2]:
 ```
-maturin develop --features usr_fn_lib
+maturin develop --features usrlib
 ```
-[^2]: If building on Linux, add the `pyo3/extension-module` feature like this: `maturin develop --features "usr_fn_lib, pyo3/extension-module"`
+[^2]: If building on Linux, add the `pyo3/extension-module` feature like this: `maturin develop --features "usrlib, pyo3/extension-module"`
 
 This command will both compile the back-end and install the full package into your active Python environment. 
 If this operation completed without errors, you should be able to import and use `nistreamer` immediately:
@@ -79,8 +79,8 @@ If build failed, refer to [troubleshooting guide](#troubleshooting).
 ### Troubleshooting
 If build fails, read the error message - it contains a lot of useful information and sometimes suggests a fix to the issue.
 
-#### Building with `usr-fn-lib`
-If building with `--features usr_fn_lib` fails, try compiling without it as a sanity check. If default build works, there is likely a mistake in your Rust code.
+#### Building with `usrlib`
+If building with `--features usrlib` fails, try compiling without it as a sanity check. If default build works, there is likely a mistake in your Rust code.
 
 Look through the full print-out. It will look something like this:
 ```
@@ -89,18 +89,19 @@ Look through the full print-out. It will look something like this:
    ...
    ... many lines skipped ... 
    ...
-   Compiling nistreamer-base v0.0.0 (C:\Users\...\nistreamer\nistreamer-base)
-   Compiling usr-fn-lib v0.1.0 (C:\Users\...\usr-fn-lib)   <-- THIS STEP FAILED
+   Compiling nistreamer-base v0.0.0 (C:\Users\...\nistreamer-base)
+   
+   Compiling nistreamer-usrlib v0.1.0 (C:\Users\...\nistreamer-usrlib)   <-- THIS STEP FAILED
    
 error[E0277]: cannot add `{integer}` to `f64`   <-- ERROR TYPE, COPY FOR WEB SEARCHING
 
-  --> C:\Users\...\usr-fn-lib\src\lib.rs:19:40   <-- PRICESE LOCATION
+  --> C:\Users\...\nistreamer-usrlib\src\lib.rs:19:40   <-- PRICESE LOCATION
   
 ... 
 help: consider using a floating-point literal by writing it with `.0`  <-- SUGGESTED FIX
 ...
 ```
-In this example, it is indeed `usr-fn-lib` which failed to compile due to a mistake in custom Rust code. In such cases, see if the compiler suggested any fixes. A web search with the error type can also give solutions for the most common Rust pitfalls. 
+In this example, it is indeed `nistreamer-usrlib` which failed to compile due to a mistake in custom Rust code. In such cases, see if the compiler suggested any fixes. A web search with the error type can also give solutions for the most common Rust pitfalls. 
 
 #### Cargo is not recognized
 If you installed Rust and still get the following error:
@@ -130,7 +131,7 @@ The following features are available:
 
 | Name            | Desctiption                                                                                                                       |
 |-----------------|-----------------------------------------------------------------------------------------------------------------------------------|
-| `usr_fn_lib`    | Include user function library. `usr-fn-lib` crate should be placed in the same directory with `nistreamer`.                       |
+| `usrlib`        | Include user function library. `nistreamer-usrlib` crate should be placed in the same directory with `nistreamer`.                |
 | `nidaqmx_dummy` | Compile with a "dummy" instead of the actual NI-DAQmx driver. Helpful for development on a computer without the driver installed. |
 
-Multiple features can be combined: `--features "usr_fn_lib, nidaqmx_dummy"`
+Multiple features can be combined: `--features "usrlib, nidaqmx_dummy"`

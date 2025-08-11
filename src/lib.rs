@@ -148,7 +148,7 @@ use pyo3::exceptions::{PyValueError};
 
 extern crate nistreamer_base;
 use nistreamer_base::fn_lib_tools::StdFnLib;
-#[cfg(feature = "usr_fn_lib")]
+#[cfg(feature = "usrlib")]
 use nistreamer_usrlib::UsrFnLib;
 
 use crate::flat_wrap::StreamerWrap;
@@ -161,7 +161,7 @@ fn _nistreamer(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(connect_terms, m)?)?;
     m.add_function(wrap_pyfunction!(disconnect_terms, m)?)?;
 
-    #[cfg(feature = "usr_fn_lib")]
+    #[cfg(feature = "usrlib")]
     m.add_class::<UsrFnLib>()?;
 
     Ok(())
