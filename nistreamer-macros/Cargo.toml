@@ -1,5 +1,5 @@
 [package]
-name = "nistreamer-fn-lib-macros"
+name = "nistreamer-macros"
 edition = "2021"
 description = "Helper procedural macros for waveform function libraries"
 
