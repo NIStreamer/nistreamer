@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 use std::f64::consts::PI;
 use nistreamer_macros::{std_fn_f64, std_fn_bool};
-use crate::fn_lib_tools::{Calc, FnBoxF64, FnBoxBool};
+use crate::fn_lib_base::{Calc, FnBoxF64, FnBoxBool};
 
 #[pyclass]
 pub struct StdFnLib {}

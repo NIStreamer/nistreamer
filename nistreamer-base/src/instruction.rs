@@ -23,7 +23,7 @@
 use std::cmp::Ordering;
 use std::fmt;
 use std::fmt::Display;
-use crate::fn_lib_tools::FnTraitSet;
+use crate::fn_lib_base::FnTraitSet;
 
 /// Struct containing function and start/end edge data of the instruction.
 ///

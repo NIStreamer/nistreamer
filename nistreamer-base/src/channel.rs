@@ -65,11 +65,10 @@
 
 use std::collections::BTreeSet;
 use std::fmt::{Debug, Formatter};
-
 use ndarray::Array1;
 
 use crate::instruction::Instr;
-use crate::fn_lib_tools::{FnTraitSet, Calc};
+use crate::fn_lib_base::{FnTraitSet, Calc};
 
 
 pub struct ConstFn<T> {

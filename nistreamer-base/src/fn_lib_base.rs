@@ -1,10 +1,5 @@
 use pyo3::prelude::*;
-
-mod std_fn_lib;
-pub use std_fn_lib::StdFnLib;
 use std::fmt::Debug;
-
-pub mod usr_lib_prelude;
 
 pub trait Calc<T> {
     fn calc(&self, t_arr: &[f64], res_arr: &mut [T]);

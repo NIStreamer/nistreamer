@@ -183,10 +183,10 @@ extern crate ndarray;
 extern crate indexmap;
 extern crate itertools;
 
-pub mod fn_lib_tools;
+pub mod fn_lib_base;
 pub mod instruction;
 pub mod channel;
 pub mod device;
 pub mod streamer;
-
-pub use fn_lib_tools::usr_lib_prelude;
+pub mod std_fn_lib;
+pub mod usrlib_prelude;

@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use nistreamer_base::fn_lib_tools::FnTraitSet;
+use nistreamer_base::fn_lib_base::FnTraitSet;
 use nistreamer_base::instruction::Instr;
 use nistreamer_base::channel::BaseChan;
 
