@@ -1,27 +1,15 @@
-# `ni-streamer`
+# NI Pulse Streamer
 
-This repository is the head of NI Pulse Streamer project. It contains the following parts:
-   * The head crate of Rust back-end;
-   * Python front-end; 
-   * Full project documentation. 
+An abstraction layer providing a Python API for scripted pulse sequence generation with [National Instruments](http://www.ni.com) hardware.
 
-See [main documentation page](https://github.com/pulse-streamer) for project details. See the main GitHub organization for. 
+**Main features:**
 
-## Back-end
- (concrete implementations for National Instruments DAQ hardware)
-`src` directory contains `_nistreamer` Rust crate:
-   * Rust wrapper of `NI-DAQmx` C API;
-   * Structs for AO and DO channels and devices;
-   * `Streamer` struct (contains thread management logic);
-   * `flat_wrap.rs` contains `StreamerWrap` struct which exposes all channel/device/streamer methods in a flat way for `PyO3` wrapping.
+* Simple Python API allows scripting very complex sequences.
 
-Once compiled, `_nistreamer.pyd` package will contain `StreamerWrap` and `StdFnLib` classes for use by the front-end `PyAPI`. If `--features usr_fn_lib` is used, there will also be `UsrFnLib` class.  
+* Streaming approach enables practically unlimited sequence duration. The pulse sequence is efficiently stored as a list of instructions, while the waveform samples are computed on the fly, requiring only a small amount of memory at any given time.
 
-## PyAPI
-`/py_api` directory contains `nistreamer` package - this is the user-facing Python API. 
+* The streaming back-end is implemented in Rust – fast, lightweight, and robust.
 
-It relies on the installed `nistreamer_backend` and its main function is to restore the original object-oriented syntax of channel/device access which had to be "flattened" into a single `StreamerWrap` when going through Rust-Python interface. It is done by representing individual channels and devices with "proxies". All proxies have direct access to the same underlying `StreamerWrap` instance, but each exposes the relevant methods only and automatically passes the corresponding channel/device name arguments when relaying the call to `StreamerWrap`.
+* Versatile package format – the streamer can be run as a standalone tool with a minimal Python script, or be integrated into any other control software.
 
-
-## Building
-Building this crate with `maturin --develop` installs `nistreamer` package in the current Python environment. Building with `maturin build` creates a distribution-ready wheel.
+See [project documentation](https://nistreamer.readthedocs.io) for more details. In particular, the `Internals/Project Structure` section explains source code layout.

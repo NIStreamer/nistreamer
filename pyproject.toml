@@ -8,7 +8,7 @@ version = "0.1.0"
 requires-python = ">=3.7"
 dependencies = ["numpy", "plotly"]
 description = "An abstraction layer providing a Python API for scripted pulse sequence generation with National Instruments hardware."
-authors = [{ name = "NIStreamer project contributors" }]
+authors = [{ name = "NI Pulse Streamer Project and Contributors <https://github.com/NIStreamer>" }]
 license = "MIT"
 readme = "README.md"
 keywords = ["pulse sequence", "experiment control", "experiment automation", "National Instruments", "NI DAQ"]
