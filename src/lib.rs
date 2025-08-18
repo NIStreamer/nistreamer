@@ -146,22 +146,22 @@ extern crate pyo3;
 use pyo3::prelude::*;
 use pyo3::exceptions::{PyValueError};
 
-extern crate base_streamer;
-use base_streamer::fn_lib_tools::StdFnLib;
-#[cfg(feature = "usr_fn_lib")]
-use usr_fn_lib::UsrFnLib;
+extern crate nistreamer_base;
+use nistreamer_base::std_fn_lib::StdFnLib;
+#[cfg(feature = "usrlib")]
+use nistreamer_usrlib::UsrFnLib;
 
 use crate::flat_wrap::StreamerWrap;
 
 #[pymodule]
-fn nistreamer_backend(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _nistreamer(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<StreamerWrap>()?;
     m.add_class::<StdFnLib>()?;
     m.add_function(wrap_pyfunction!(reset_dev, m)?)?;
     m.add_function(wrap_pyfunction!(connect_terms, m)?)?;
     m.add_function(wrap_pyfunction!(disconnect_terms, m)?)?;
 
-    #[cfg(feature = "usr_fn_lib")]
+    #[cfg(feature = "usrlib")]
     m.add_class::<UsrFnLib>()?;
 
     Ok(())

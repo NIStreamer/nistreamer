@@ -4,7 +4,7 @@ Contains the ``BaseCardProxy`` and ``AO/DOCardProxy`` classes
 representing individual cards.
 """
 
-from nistreamer_backend import StreamerWrap as _StreamerWrap
+from ._nistreamer import StreamerWrap as _StreamerWrap
 from .channel import AOChanProxy, DOChanProxy
 from .utils import reset_dev
 from typing import Union, Optional, Type

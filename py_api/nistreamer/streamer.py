@@ -4,7 +4,7 @@ Contains the main ``NIStreamer`` class, as well as ``StreamHandle`` inner class
 for stream control in ``with`` context.
 """
 
-from nistreamer_backend import StreamerWrap as _StreamerWrap
+from ._nistreamer import StreamerWrap as _StreamerWrap
 from .card import BaseCardProxy, AOCardProxy, DOCardProxy
 from typing import Optional, Literal, Union, Tuple, Type
 

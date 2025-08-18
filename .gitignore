@@ -24,3 +24,6 @@ __pycache__/
 
 # Sphinx build artifacts
 docs/_build/
+
+# Compiled _nistreamer back-end DLL when istalled with `maturin develop`
+py_api/nistreamer/*.pyd

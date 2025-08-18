@@ -39,8 +39,8 @@ use indexmap::IndexMap;
 use itertools::Itertools;
 use parking_lot::Mutex;
 
-use base_streamer::channel::BaseChan;
-use base_streamer::device::BaseDev;
+use nistreamer_base::channel::BaseChan;
+use nistreamer_base::device::BaseDev;
 
 use crate::channel::{AOChan, DOChan, DOPort};
 use crate::utils::StreamCounter;

@@ -56,8 +56,8 @@ use parking_lot::Mutex;
 use itertools::Itertools;
 use indexmap::IndexMap;
 
-use base_streamer::device::BaseDev;
-use base_streamer::streamer::{TagBaseDev, BaseStreamer};
+use nistreamer_base::device::BaseDev;
+use nistreamer_base::streamer::{TagBaseDev, BaseStreamer};
 
 use crate::device::{AODev, DODev, NIDev, StartSync, WorkerError};
 use crate::worker_cmd_chan::{CmdChan, WorkerCmd};

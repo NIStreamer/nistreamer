@@ -1,0 +1,20 @@
+[package]
+name = "nistreamer-base"
+edition = "2021"
+description = "Base traits of NIStreamer back-end"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+#[[bin]]
+#name = "test_bin"
+#path = "src/main.rs"
+#
+#[[bin]]
+#name = "unittest"
+#path = "src/unittest.rs"
+
+[dependencies]
+nistreamer-macros = { path = "../nistreamer-macros" }  # use `features = ["debug_token_print"]` to print macro-generated tokens during compilation
+ndarray = "0.15.6"
+pyo3 = { version = "0.22.1", features = ["multiple-pymethods", "abi3-py37"] }  # "extension-module"
+indexmap = "2.3.0"
+itertools = "0.14.0"
