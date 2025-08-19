@@ -25,7 +25,7 @@ extensions = [
     'sphinx.ext.viewcode',
     'sphinx_autodoc_typehints',
 ]
-autodoc_mock_imports = ['_nistreamer', 'numpy', 'plotly']
+autodoc_mock_imports = ['nistreamer._nistreamer', 'numpy', 'plotly']
 autodoc_member_order = "bysource"
 autosummary_generate = True
 napoleon_google_docstring = True
