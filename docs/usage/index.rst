@@ -1,8 +1,8 @@
 Usage
 =====
 
-This section contains a series of quick tutorials - a step-by-step walk-through from
-the first-time use to advanced sequence scripting.
+This section contains a series of quick tutorials - a step-by-step guide from
+the first use to advanced sequence scripting.
 
 .. note::
     Each tutorial is a Jupyter Notebook. You can download the source ``.ipynb`` files
