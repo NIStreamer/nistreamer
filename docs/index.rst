@@ -31,7 +31,7 @@ An abstraction layer providing a Python API for scripted pulse sequence generati
 
 * Versatile package format – the streamer can be run as a standalone tool with a minimal Python script, or be integrated into any other control software.
 
-See the `demo notebooks <https://github.com/NIStreamer/nistreamer/tree/main/py_api/demo>`_ for the example workflow.
+See :doc:`Tutorials <usage/index>` for complete examples and :doc:`Getting Started <getting_started/index>` for installation instructions.
 
 .. toctree::
     :maxdepth: 2
