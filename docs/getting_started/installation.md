@@ -10,7 +10,7 @@ This will download and install a fully pre-compiled package into your Python env
 ```Python
 from nistreamer import NIStreamer, std_fn_lib
 ```
-Check out [demos](https://github.com/NIStreamer/nistreamer/tree/main/py_api/demo) to get started. 
+Next, check out quick-start {doc}`tutorials </usage/index>`.
 
 :::{note}
 A pre-compiled version is only available for Windows, x86-64/AMD64 architecture, Python 3.7 and higher. You need to build from source to run on other platforms (see instructions below).
@@ -71,8 +71,8 @@ If this operation completed without errors, you should be able to import and use
 ```Python
 from nistreamer import NIStreamer, std_fn_lib 
 from nistreamer import usr_fn_lib  # only if this feature was enabled
-```  
-Next, you can check out [demos](https://github.com/NIStreamer/nistreamer/tree/main/py_api/demo) for a quick-start guide. 
+```   
+Next, check out quick-start {doc}`tutorials </usage/index>`.
 
 If build failed, refer to [troubleshooting guide](#troubleshooting).
 
