@@ -44,7 +44,11 @@ There are several reasons for such sub-package structure. First, `nistreamer-mac
 * Such separation simplifies development. If any changes are made to `nistreamer-base`, one can attempt compiling it without having to refactor `nistreamer` yet.
 
 ## Rust-Python Interface
-![The schematic shows how Python front-end interfaces with Rust back-end. The main poit of contact is `StreamerWrap` - a single struct exposing a "flattened" Rust API through which the full streamer-device-channel tree is accessed from Python. Two more points of interface are `StdFnLib` and `UsrFnLib` structs containing waveform function libraries. On the Python side, a tree of proxy classes is shown. Each proxy communicates directly with the `StreamerWrap` instance, but the tree of proxies is mimicking the original streamer-device-channel tree of the back-end. The schematic is also highlighting a subtle detail - waveform function instances, once returned by a library method call, are passed across Python, and make it back into Rust through `StreamerWrap`. More details about this will be covered in a separate section.](../images/rust_py_interface.svg "Rust-Python interface and PyAPI proxy tree")
+(rust-py-interface)=
+```{image} ../images/rust_py_interface.svg
+:alt: The schematic shows how Python front-end interfaces with Rust back-end. The main poit of contact is `StreamerWrap` - a single struct exposing a "flattened" Rust API through which the full streamer-device-channel tree is accessed from Python. Two more points of interface are `StdFnLib` and `UsrFnLib` structs containing waveform function libraries. On the Python side, a tree of proxy classes is shown. Each proxy communicates directly with the `StreamerWrap` instance, but the tree of proxies is mimicking the original streamer-device-channel tree of the back-end. The schematic is also highlighting a subtle detail - waveform function instances, once returned by a library method call, are passed across Python, and make it back into Rust through `StreamerWrap`. More details about this will be covered in a separate section.
+:align: center
+```
 
 We use a combination of [`PyO3`](https://github.com/PyO3/pyo3) and [`maturin`](https://github.com/PyO3/maturin) to build and wrap the back-end as a Python extension module. 
 
