@@ -147,7 +147,7 @@ to allow for adding custom waveforms locally.
 
 This library is contained in a separate crate `nistreamer-usrlib` and is marked as an optional dependency
 behind `usrlib` feature:
-- by default, backend compiles without it;
+- by default, back-end compiles without it;
 - while compiling with `--features usrlib` flag includes it.
 
 (see {doc}`compilation instructions </getting_started/installation>` for details).
@@ -174,12 +174,9 @@ ao_chan.add_instr(
 ```
 
 ### Helper procedural macros
-**Problem 4** - minimize the amount of Rust code users have to write when adding custom waveforms.
-
 Apart from being located in a separate crate and a separate repository, `usr_fn_lib` is implemented
-in the same way as `std_fn_lib`. The example below shows what a minimal example of `nistreamer-usrlib/src/lib.rs`
-with just a single custom waveform `MyLinFn` would look like:
-
+in the same way as `std_fn_lib`. The example below shows what a minimal version of `nistreamer-usrlib/src/lib.rs`
+would look like with just a single custom waveform `MyLinFn`:
 ```Rust
 // Uses:
 use pyo3::prelude::*;
@@ -212,7 +209,6 @@ impl UsrFnLib {
     /// Linear function:
     ///     `MyLinFn(t) = slope*t + offs`
     #[allow(non_snake_case)]
-    #[pyo3(signature = (slope, offs))]
     fn MyLinFn(&self, slope: f64, offs: f64) -> PyResult<FnBoxF64> {
         let fn_inst = MyLinFn::new(slope, offs);
         let fn_box = FnBoxF64 { inner: Box::new(fn_inst) };
@@ -221,14 +217,24 @@ impl UsrFnLib {
 }
 impl Calc<f64> for MyLinFn { /* implementation here */ }
 ```
+Then PyO3 macros generate `UsrFnLib` Python class with a method `MyLinFn`,
+with the doc-comment automatically relayed into Python docstring:
+```
+Signature: usr_fn_lib.MyLinFn(slope, offs)
+Docstring:
+Linear function:
+    `MyLinFn(t) = slope*t + offs`
+Type:      builtin_function_or_method
+```
+
 This version would be completely acceptable for the built-in `std_fn_lib`, 
-but is problematic for the user-editable `usr_fn_lib`:
+but is problematic for `usr_fn_lib`:
 
 - There are many internal details, that are not meant to be a part of public API but still have to be 
   written explicitly (e.g. type names `UsrFnLib`, `FnBoxF64`, location of `fn_lib_base`, and so on). 
   These details may change in the future, resulting in unnecessary breaking changes.
 
-- Users have to manually write the `#[pymethods] impl UsrFnLib { ... }` for each new waveform, 
+- Users have to manually write the `#[pymethods] impl UsrFnLib { ... }` block for each new waveform, 
   which may be tedious and intimidating (we don't assume Rust proficiency).
 
 To address these issues, we hide most of the code into procedural macros. 
@@ -239,8 +245,7 @@ usrlib_boilerplate!();
 
 /// Linear function:
 ///     `MyLinFn(t) = slope*t + offs`
-/// `offs` is optional and defaults to 0.0
-#[usr_fn_f64(slope, offs=0.0)]
+#[usr_fn_f64]
 pub struct MyLinFn {
     slope: f64,
     offs: f64,
@@ -249,15 +254,17 @@ impl Calc<f64> for MyLinFn { /* implementation here */ }
 ```
 Here:
 - `usrlib_prelude` module bundles all necessary imports;
-- `usrlib_boilerplate!()` expands to the `UsrFnLib` setup;
-- `usr_fn_f64` generates the `impl MyLinFn {pub fn new(...)}` and `#[pymethods] impl UsrFnLib { fn MyLinFn(...) }` 
-  blocks based on the struct contents.
+- `usrlib_boilerplate!()` function-like macro expands to the `UsrFnLib` setup;
+- `usr_fn_f64` attribute-like macro automatically generates the `impl MyLinFn {pub fn new(...)}` 
+  and `#[pymethods] impl UsrFnLib { fn MyLinFn(...) }` blocks based on the struct contents 
+  it is attached to.
 
 So for each new waveform, users only have to write the definition of the struct
 and `Calc<T>` trait implementation. Then it is sufficient to attach one of the two macros - `usr_fn_f64` 
-for analog and `usr_fn_bool` for digital waveforms - which auto-generate the rest of the code.
+for analog or `usr_fn_bool` for digital waveforms - which auto-generates the rest of the code.
 
-User can also specify default values by providing the full Python signature:
+We also utilize the optional `#[pyo3(signature = (...))]` attribute to specify default parameter 
+values for the generated Python methods by passing it the token stream from `usr_fn_f64` argument:
 ```Rust
 /// Linear function:
 ///     `MyLinFn(t) = slope*t + offs`
@@ -268,10 +275,11 @@ pub struct MyLinFn {
     offs: f64,
 }
 ```
-(see full details in the usage manual).
+results in `MyLinFn(slope, offs=0.0)` Python method.
 
-Although this is not strictly necessary, the same logic is used for two similar macros - `std_fn_f64` and `std_fn_bool`
-which are used for most waveforms in `std_fn_lib`.
+Although this is not strictly necessary, there are two similar macros - `std_fn_f64` and `std_fn_bool` -
+which are used for most waveforms in `std_fn_lib` and are based on the same logic as `usr_fn_f64`.
+All macros are defined in a separate sub-package `nistreamer-macros`.
 
 As a technical note, we rely on `multiple-pymethods` feature of `PyO3` to collect methods from all 
 `#[pymethods] impl UsrFnLib` blocks together.
