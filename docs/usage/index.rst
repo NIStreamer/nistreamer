@@ -16,3 +16,4 @@ the first use to advanced sequence scripting.
     hardware_sync
     sequence_scripting
     context_manager
+    usrlib
