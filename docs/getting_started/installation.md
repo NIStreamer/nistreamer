@@ -16,6 +16,7 @@ Next, check out quick-start {doc}`tutorials </usage/index>`.
 A pre-compiled version is only available for Windows, x86-64/AMD64 architecture, Python 3.7 and higher. You need to build from source to run on other platforms (see instructions below).
 :::
 
+(building-from-source)=
 ## Building from source
 You need to compile the project directly from source in the following cases:
 * When adding custom waveform functions through `usrlib` option;

@@ -44,13 +44,17 @@ There are several reasons for such sub-package structure. First, `nistreamer-mac
 * Such separation simplifies development. If any changes are made to `nistreamer-base`, one can attempt compiling it without having to refactor `nistreamer` yet.
 
 ## Rust-Python Interface
-![The schematic shows how Python front-end interfaces with Rust back-end. The main poit of contact is `StreamerWrap` - a single struct exposing a "flattened" Rust API through which the full streamer-device-channel tree is accessed from Python. Two more points of interface are `StdFnLib` and `UsrFnLib` structs containing waveform function libraries. On the Python side, a tree of proxy classes is shown. Each proxy communicates directly with the `StreamerWrap` instance, but the tree of proxies is mimicking the original streamer-device-channel tree of the back-end. The schematic is also highlighting a subtle detail - waveform function instances, once returned by a library method call, are passed across Python, and make it back into Rust through `StreamerWrap`. More details about this will be covered in a separate section.](../images/rust_py_interface.svg "Rust-Python interface and PyAPI proxy tree")
+(rust-py-interface)=
+```{image} ../images/rust_py_interface.svg
+:alt: The schematic shows how Python front-end interfaces with Rust back-end. The main poit of contact is `StreamerWrap` - a single struct exposing a "flattened" Rust API through which the full streamer-device-channel tree is accessed from Python. Two more points of interface are `StdFnLib` and `UsrFnLib` structs containing waveform function libraries. On the Python side, a tree of proxy classes is shown. Each proxy communicates directly with the `StreamerWrap` instance, but the tree of proxies is mimicking the original streamer-device-channel tree of the back-end. The schematic is also highlighting a subtle detail - waveform function instances, once returned by a library method call, are passed across Python, and make it back into Rust through `StreamerWrap`. More details about this will be covered in a separate section.
+:align: center
+```
 
 We use a combination of [`PyO3`](https://github.com/PyO3/pyo3) and [`maturin`](https://github.com/PyO3/maturin) to build and wrap the back-end as a Python extension module. 
 
 To expose public methods of a streamer and all contained devices and channels, we bring them together in a "flattened" manner as methods of a single `StreamerWrap` struct which is annotated as `#[pyclass]` (see `flat_wrap.rs` module). So in Python, there is only a single "monolithic" entity representing the entire streamer tree - a `StreamerWrap` instance. Calling a method on a particular channel, for example, is done through a corresponding method of `StreamerWrap` by providing the full device and channel identifiers. 
 
-This approach minimizes the Rust-Python boundary at the cost of losing the user-friendly dot notation access to device and channel methods. It is artificially restored by the Python front-end layer (see [next section](#front-end)).  
+This approach minimizes the Rust-Python boundary at the cost of losing the user-friendly dot notation access to device and channel methods. It is artificially restored by the Python front-end layer (see [next section](#python-front-end)).  
 
 When building with `maturin`, compiled backend is packaged as an importable DLL module `_nistreamer.pyd` which is placed directly into the front-end directory for use by the proxy classes. 
 
