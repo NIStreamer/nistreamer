@@ -20,7 +20,7 @@ Your application can still read inputs by creating input tasks directly through 
 
 Each pulse is specified by a start time/duration and the _waveform function_. The streamer can only play waveform functions defined in its library – somewhat analogous to a [function generator](https://en.wikipedia.org/wiki/Function_generator) as opposed to an [arbitrary waveform generator](https://en.wikipedia.org/wiki/Arbitrary_waveform_generator). 
 
-Streamer has a built-in library with some commonly used mathematical functions. Users can also add arbitrary custom functions using the optional `usr_fn_lib` feature. It requires writing a minimal amount of Rust code and re-compiling the backend, but we tried to make it maximally simple.
+Streamer has a built-in library with some commonly used mathematical functions. Users can also add custom functions using the optional `usrlib` feature. It requires writing a minimal amount of Rust code and re-compiling the backend, but we tried to make it maximally simple (see the {doc}`tutorial </usage/usrlib>`).
 
 ## Risk of underrun
 
