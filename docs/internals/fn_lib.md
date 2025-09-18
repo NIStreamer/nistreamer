@@ -5,16 +5,16 @@ For each instruction, values are computed by evaluating the contained mathematic
 We interchangeably call them "waveform functions", "waveforms", or simply "functions".
 
 The main challenge is that waveform library has to be written in Rust 
-(sample computation must be fast), but at the same time it needs to be _extensible_. 
+(since sample computation must be fast), but at the same time it has to be _extensible_. 
 
 As project is evolving, more functions will be added. Moreover, users may need to introduce custom 
-functions for their specific applications. There should be a clean way of adding new waveforms 
-without making any changes to the codebase core.
+functions for their specific applications. There should be a clean and sustainable way of adding 
+new waveforms without making any changes to the codebase core.
 
 This section describes the implemented library mechanism.
 
 ## Waveforms as trait objects
-**Problem 1** - _treating diverse waveforms in a uniform way_.
+**Problem 1** - _treat diverse waveforms in a uniform way_.
 
 We represent each waveform by a struct containing corresponding function parameters like this:
 ```Rust
@@ -62,9 +62,9 @@ Box<dyn FnTraitSet<T>>
 and expanding function library does not require any additional changes anywhere.
 
 ## Waveform library classes
-**Problem 2** - _avoiding explicit relay code at the Rust-Python interface_.
+**Problem 2** - _avoid explicit relay code at the Rust-Python interface_.
 
-Waveforms are defined in Rust back-end, while user script makes selections through Python front-end -
+Waveforms are defined in the Rust back-end, while user script makes pulse selections through the Python front-end -
 there has to be a relay mechanism between the two. And it has to allow for extensibility as well - 
 no manual edits should be required as new waveforms are added to the library. 
 Implemented mechanism is described below. 
@@ -133,7 +133,7 @@ ao_chan.add_instr(
 Exposing waveform libraries as separate Python classes allows for the following key properties:
 * Streamer core only exposes a single entry point for all waveforms - the `add_instr` methods of  `StreamerWrap`;
 * Waveform library `pyclass`es are exposed publicly (in contrast to `StreamerWrap`, which is hidden behind PyAPI),
-  allowing direct use of the named methods `PyO3` macros automatically generated for every waveform .
+  allowing direct use of the named Python methods that `PyO3` macros automatically generate for every waveform.
 
 As a result, there is no explicit relay code, so adding new waveforms to libraries does not require making 
 any edits in the back-end core or PyAPI, as required for extensibility.
@@ -145,7 +145,7 @@ It is always possible that a user needs a highly-specialized waveform which is n
 in the built-in library. The user-editable `usr_fn_lib` is introduced for such cases 
 to allow for adding custom waveforms locally.
 
-This library is contained in a separate crate `nistreamer-usrlib` and is marked as an optional dependency
+This library is contained in a separate crate `nistreamer-usrlib` which is an optional dependency
 behind `usrlib` feature:
 - by default, back-end compiles without it;
 - while compiling with `--features usrlib` flag includes it.
@@ -154,9 +154,10 @@ behind `usrlib` feature:
 
 Moreover, `nistreamer-usrlib` is split out into a separate `git`/`GitHub` [repository](https://github.com/NIStreamer/nistreamer-usrlib)
 to maximally decouple it from the rest of the codebase and simplify version control task for the users. 
-Users are advised to create a fork of this GitHub repository to simplify bringing in any future updates.
+Users are advised to create a fork of this GitHub repository. That way any necessary updates 
+can be merged from the up-stream in a streamlined way.
 
-If compiled with `usrlib` feature, user library can be imported and used alongside with `std_fn_lib`: 
+If compiled with `usrlib` feature, `usr_fn_lib` can be imported and used alongside with `std_fn_lib`: 
 ```Python
 from nistreamer import std_fn_lib, usr_fn_lib
 
@@ -173,12 +174,12 @@ ao_chan.add_instr(
 )
 ```
 
-### Helper procedural macros
+### Procedural macros
 Apart from being located in a separate crate and a separate repository, `usr_fn_lib` is implemented
 in the same way as `std_fn_lib`. The example below shows what a minimal version of `nistreamer-usrlib/src/lib.rs`
 would look like with just a single custom waveform `MyLinFn`:
 ```Rust
-// Uses:
+// Imports:
 use pyo3::prelude::*;
 use nistreamer_base::fn_lib_base::{Calc, FnBoxF64, FnBoxBool};
 
@@ -218,7 +219,7 @@ impl UsrFnLib {
 impl Calc<f64> for MyLinFn { /* implementation here */ }
 ```
 Then PyO3 macros generate `UsrFnLib` Python class with a method `MyLinFn`,
-with the doc-comment automatically relayed into Python docstring:
+with the doc-comment automatically converted into Python docstring:
 ```
 Signature: usr_fn_lib.MyLinFn(slope, offs)
 Docstring:
@@ -237,8 +238,8 @@ but is problematic for `usr_fn_lib`:
 - Users have to manually write the `#[pymethods] impl UsrFnLib { ... }` block for each new waveform, 
   which may be tedious and intimidating (we don't assume Rust proficiency).
 
-To address these issues, we hide most of the code into procedural macros. 
-Macros reduce the above example to the following:
+To address these issues, we hide most of the code into procedural macros 
+which reduce the above example down to the following:
 ```Rust
 use nistreamer_base::usrlib_prelude::*;
 usrlib_boilerplate!();
@@ -261,7 +262,7 @@ Here:
 
 So for each new waveform, users only have to write the definition of the struct
 and `Calc<T>` trait implementation. Then it is sufficient to attach one of the two macros - `usr_fn_f64` 
-for analog or `usr_fn_bool` for digital waveforms - which auto-generates the rest of the code.
+for analog or `usr_fn_bool` for digital waveforms - which auto-generate the rest of the code.
 
 We also utilize the optional `#[pyo3(signature = (...))]` attribute to specify default parameter 
 values for the generated Python methods by passing it the token stream from `usr_fn_f64` argument:
@@ -275,7 +276,15 @@ pub struct MyLinFn {
     offs: f64,
 }
 ```
-results in `MyLinFn(slope, offs=0.0)` Python method.
+results in a waveform method with default values:
+```
+Signature: usr_fn_lib.MyLinFn(slope, offs=0.0)
+Docstring:
+My linear function:
+    `MyLinFn(t) = slope*t + offs`
+`offs` is optional and defaults to `0.0`
+Type:      builtin_function_or_method
+```
 
 Although this is not strictly necessary, there are two similar macros - `std_fn_f64` and `std_fn_bool` -
 which are used for most waveforms in `std_fn_lib` and are based on the same logic as `usr_fn_f64`.
