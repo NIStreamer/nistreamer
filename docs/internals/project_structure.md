@@ -54,7 +54,7 @@ We use a combination of [`PyO3`](https://github.com/PyO3/pyo3) and [`maturin`](h
 
 To expose public methods of a streamer and all contained devices and channels, we bring them together in a "flattened" manner as methods of a single `StreamerWrap` struct which is annotated as `#[pyclass]` (see `flat_wrap.rs` module). So in Python, there is only a single "monolithic" entity representing the entire streamer tree - a `StreamerWrap` instance. Calling a method on a particular channel, for example, is done through a corresponding method of `StreamerWrap` by providing the full device and channel identifiers. 
 
-This approach minimizes the Rust-Python boundary at the cost of losing the user-friendly dot notation access to device and channel methods. It is artificially restored by the Python front-end layer (see [next section](#front-end)).  
+This approach minimizes the Rust-Python boundary at the cost of losing the user-friendly dot notation access to device and channel methods. It is artificially restored by the Python front-end layer (see [next section](#python-front-end)).  
 
 When building with `maturin`, compiled backend is packaged as an importable DLL module `_nistreamer.pyd` which is placed directly into the front-end directory for use by the proxy classes. 
 
