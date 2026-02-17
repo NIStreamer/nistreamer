@@ -140,7 +140,8 @@ def iplot(chan_list,
           end_time: Union[float, None] = None,
           nsamps: Optional[int] = 1000,
           renderer: Optional[str] = 'browser',
-          row_height: Union[float, None] = None):
+          row_height: Union[float, None] = None,
+          return_fig: Optional[bool] = False):
     """Plot signals for a list of channels.
 
     Values are computed for a grid of ``nsamps`` time points uniformly
@@ -154,6 +155,8 @@ def iplot(chan_list,
         nsamps: number of time points to evaluate for each channel
         renderer: Plotly renderer to use. A few options are collected in :class:`RendOption`
         row_height: channel sub-plot height
+        return_fig: if ``True``, returns the plotly figure instance for further modifications
+            instead of displaying it.
 
     Raises:
         ImportError: if ``plotly`` is not installed
@@ -222,5 +225,8 @@ def iplot(chan_list,
             row=idx + 1, col=1
         )
 
-    fig.show(renderer=renderer)
+    if return_fig:
+        return fig
+    else:
+        fig.show(renderer=renderer)
 # endregion
