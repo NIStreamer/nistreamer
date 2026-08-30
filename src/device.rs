@@ -348,7 +348,10 @@ pub trait RunControl: CommonHwCfg {
         for rep_idx in 0..nreps {
             // Stream the waveform itself
             while let Some((start_pos, end_pos)) = stream_bundle.counter.tick_next() {
+                let start_time = Instant::now();
                 self.calc_samps(samp_bufs, start_pos, end_pos)?;
+                let elapsed = start_time.elapsed();
+                println!("{},", elapsed.as_micros());
                 stream_bundle.total_written += self.write_to_hardware(stream_bundle, samp_bufs, end_pos - start_pos)? as u64;
             }
             stream_bundle.counter.reset();
